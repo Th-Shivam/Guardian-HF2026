@@ -1,0 +1,123 @@
+"""WhatsApp webhook endpoints.
+
+Thin by design: both handlers delegate to the configured
+:class:`~app.services.whatsapp.base.WhatsAppProvider` and translate nothing
+themselves. The body is accepted as a raw mapping rather than a Meta-shaped
+model so the route stays provider-agnostic — validation belongs to the
+adapter that owns the wire format.
+"""
+
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Body, Depends, Query
+from fastapi.responses import PlainTextResponse
+
+from app.core.logging import get_logger
+from app.schemas.whatsapp import AcknowledgedMessage, VerificationRequest, WebhookAck
+from app.services.whatsapp import WhatsAppProvider, get_whatsapp_provider
+
+logger = get_logger(__name__)
+
+router = APIRouter()
+
+ProviderDep = Annotated[WhatsAppProvider, Depends(get_whatsapp_provider)]
+
+_EXAMPLE_PAYLOAD: dict[str, Any] = {
+    "object": "whatsapp_business_account",
+    "entry": [
+        {
+            "id": "102290129340398",
+            "changes": [
+                {
+                    "field": "messages",
+                    "value": {
+                        "messaging_product": "whatsapp",
+                        "contacts": [{"wa_id": "16505551234", "profile": {"name": "Asha"}}],
+                        "messages": [
+                            {
+                                "id": "wamid.HBgLMTY1MDU1NTEyMzQVAgASGBQz",
+                                "from": "16505551234",
+                                "timestamp": "1700000000",
+                                "type": "text",
+                                "text": {"body": "Your account is locked, verify at http://bit.ly/x"},
+                            }
+                        ],
+                    },
+                }
+            ],
+        }
+    ],
+}
+
+
+@router.get(
+    "/webhook",
+    response_class=PlainTextResponse,
+    summary="Verify the webhook subscription",
+    responses={
+        200: {"description": "Challenge echoed back verbatim."},
+        403: {"description": "Bad mode or token."},
+    },
+)
+def verify_webhook(
+    provider: ProviderDep,
+    hub_mode: Annotated[str, Query(alias="hub.mode", examples=["subscribe"])],
+    hub_verify_token: Annotated[str, Query(alias="hub.verify_token")],
+    hub_challenge: Annotated[str, Query(alias="hub.challenge")],
+) -> str:
+    """Complete a provider's subscription handshake.
+
+    The challenge must come back as raw text, not JSON — providers compare the
+    response body byte for byte.
+    """
+    challenge = provider.verify_subscription(
+        VerificationRequest(mode=hub_mode, token=hub_verify_token, challenge=hub_challenge)
+    )
+    logger.info("WhatsApp subscription verified for provider %r", provider.name)
+    return challenge
+
+
+@router.post(
+    "/webhook",
+    response_model=WebhookAck,
+    summary="Receive an inbound message payload",
+    responses={
+        200: {"description": "Payload understood; messages extracted."},
+        422: {"description": "Payload did not match the provider's schema."},
+    },
+)
+def receive_webhook(
+    provider: ProviderDep,
+    payload: Annotated[dict[str, Any], Body(examples=[_EXAMPLE_PAYLOAD])],
+) -> WebhookAck:
+    """Accept a webhook delivery and acknowledge what was extracted.
+
+    A well-formed delivery that carries no user messages (delivery receipts,
+    unsupported media types) is still a success: it returns 200 with
+    ``accepted: 0``. Providers retry on non-2xx and eventually disable a
+    webhook that keeps failing, so only genuinely malformed bodies error.
+
+    Nothing is analysed or stored yet.
+    """
+    parsed = provider.parse_inbound(payload)
+
+    logger.info(
+        "WhatsApp webhook: provider=%s accepted=%d ignored=%d",
+        provider.name,
+        len(parsed.messages),
+        parsed.ignored,
+    )
+
+    return WebhookAck(
+        provider=provider.name,
+        accepted=len(parsed.messages),
+        ignored=parsed.ignored,
+        messages=[
+            AcknowledgedMessage(
+                message_id=message.message_id,
+                sender=message.sender,
+                timestamp=message.timestamp,
+            )
+            for message in parsed.messages
+        ],
+    )

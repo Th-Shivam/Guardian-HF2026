@@ -42,6 +42,15 @@ class Settings(BaseSettings):
     # comma-separated form fail. Parsed via `cors_origin_list` below.
     cors_origins: str = "http://localhost:5173"
 
+    # ---- WhatsApp ----
+    # Which provider adapter to use. See app.services.whatsapp.registry.
+    whatsapp_provider: str = "meta"
+
+    # Shared secret echoed back during the provider's subscription handshake.
+    # Intentionally empty by default: an unset token must fail loudly rather
+    # than silently accept whatever the caller sends.
+    whatsapp_verify_token: str = ""
+
     @property
     def cors_origin_list(self) -> list[str]:
         """CORS origins as a clean list."""
