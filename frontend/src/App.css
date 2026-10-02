@@ -1,0 +1,20 @@
+.shell {
+  min-height: 100svh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 2rem;
+  text-align: center;
+}
+
+.tagline {
+  color: var(--text-strong);
+  font-size: 1.125rem;
+}
+
+.note {
+  max-width: 32rem;
+  font-size: 0.9375rem;
+}
