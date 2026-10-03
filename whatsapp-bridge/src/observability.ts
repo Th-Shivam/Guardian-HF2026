@@ -15,8 +15,9 @@ const SAFE_NAMES = new Set([
 let enabled = false
 
 type SpanData = NonNullable<Sentry.Event['spans']>[number]
+type TraceData = NonNullable<NonNullable<Sentry.Event['contexts']>['trace']>
 
-function safeSpan(span: SpanData): SpanData {
+function safeSpan<T extends SpanData | TraceData>(span: T): T {
   return {
     trace_id: span.trace_id,
     span_id: span.span_id,
@@ -25,9 +26,10 @@ function safeSpan(span: SpanData): SpanData {
     timestamp: span.timestamp,
     op: span.op,
     status: span.status,
-    description: SAFE_NAMES.has(span.description ?? '') ? span.description : 'guardian.operation',
+    description: typeof span.description === 'string' && SAFE_NAMES.has(span.description)
+      ? span.description : 'guardian.operation',
     data: Object.fromEntries(Object.entries(span.data ?? {}).filter(([key]) => SAFE_DATA.has(key))),
-  }
+  } as T
 }
 
 function scrubEvent<T extends Sentry.Event>(event: T): T {
@@ -41,7 +43,7 @@ function scrubEvent<T extends Sentry.Event>(event: T): T {
     platform: event.platform,
     level: event.level,
     sdk: event.sdk,
-    contexts: event.contexts?.trace ? { trace: safeSpan(event.contexts.trace as SpanData) } : {},
+    contexts: event.contexts?.trace ? { trace: safeSpan(event.contexts.trace) } : {},
     ...(event.type === 'transaction' ? {
       transaction: SAFE_NAMES.has(event.transaction ?? '') ? event.transaction : 'guardian.request',
       spans: event.spans?.map(safeSpan),
