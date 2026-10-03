@@ -22,6 +22,9 @@ dist-ssr/
 *.local
 .vite/
 
+# WhatsApp linked-device credentials and Signal keys (never commit)
+whatsapp-bridge/.auth/
+
 # ---- Logs ----
 *.log
 npm-debug.log*

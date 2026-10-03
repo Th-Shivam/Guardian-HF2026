@@ -6,11 +6,11 @@ A user forwards a suspicious WhatsApp message to Guardian's number. Guardian
 analyses it and replies with a simple risk assessment and one safe action to
 take.
 
-> **Status: evidence-grounded reasoning.** The FastAPI webhook normalises
-> messages, detects deterministic signals, and can collect real domain-search
-> evidence through SerpApi before requesting a structured risk assessment from
-> an open-weight Gemma model. Both integrations require configuration. The React
-> frontend remains a placeholder; outbound delivery and a database are not built.
+> **Status: WhatsApp Web bridge + evidence-grounded reasoning.** A small Baileys
+> bridge receives private text messages and sends Guardian's reply back over
+> WhatsApp Web. FastAPI owns the existing signal, URL, SerpApi, and Gemma pipeline.
+> No Meta Cloud API is used by the bridge. The React frontend remains a placeholder;
+> a database is not built yet.
 
 ## Structure
 
@@ -28,6 +28,8 @@ take.
 │   └── requirements-dev.txt
 ├── frontend/             React + TypeScript + Vite
 │   └── src/
+├── whatsapp-bridge/      Node.js/TypeScript Baileys transport
+│   └── src/
 ├── tests/                pytest suite for the backend
 ├── .env.example
 ├── pytest.ini
@@ -38,7 +40,7 @@ The `services/` subpackages keep logic out of the HTTP layer:
 
 | Package              | Status                                          |
 | -------------------- | ----------------------------------------------- |
-| `services/whatsapp/` | inbound webhook + verification (outbound is a stub) |
+| `services/whatsapp/` | legacy webhook adapter; not used by the Baileys bridge |
 | `services/processing/` | normalization, existing evidence collection, and configured Gemma reasoning |
 | `services/analysis/` | deterministic text signals, URL extraction, lexical URL analysis |
 | `services/url/`      | real SerpApi domain searches and concise source evidence |
@@ -47,68 +49,30 @@ The `services/` subpackages keep logic out of the HTTP layer:
 
 ## API
 
-| Method | Path                    | What                                  |
-| ------ | ----------------------- | ------------------------------------- |
-| GET    | `/`                     | service metadata                      |
-| GET    | `/health`               | liveness probe                        |
-| GET    | `/docs`                 | interactive API docs                  |
-| GET    | `/api/whatsapp/webhook` | subscription handshake                |
-| POST   | `/api/whatsapp/webhook` | receive an inbound message payload    |
+| Method | Path | What |
+| --- | --- | --- |
+| GET | `/` | service metadata |
+| GET | `/health` | liveness probe |
+| GET | `/docs` | interactive API docs |
+| POST | `/api/bridge/messages` | authenticated normalized message → Guardian reply |
 
-### Webhook verification
+### WhatsApp communication with Baileys
 
-Providers confirm ownership of the endpoint by calling it with a challenge.
-Guardian echoes the challenge back as **raw text** only when `hub.verify_token`
-matches `GUARDIAN_WHATSAPP_VERIFY_TOKEN` (compared in constant time).
-
-```bash
-curl "http://127.0.0.1:8000/api/whatsapp/webhook?hub.mode=subscribe&hub.verify_token=$TOKEN&hub.challenge=12345"
-# -> 12345        (text/plain, 200)
-# -> 403 if the token or mode is wrong
-# -> 500 if GUARDIAN_WHATSAPP_VERIFY_TOKEN is unset — it fails closed
+```text
+WhatsApp Web → whatsapp-bridge/ → FastAPI → existing analysis pipeline
+             ← original sender ← reply ← Gemma assessment
 ```
 
-### Receiving a message
+The bridge authenticates with a QR or pairing code, retains its linked-device
+session locally, and sends normalized `GuardianMessage` fields to FastAPI using
+a shared bearer token. FastAPI formats the generated short explanation and
+recommended action into a `reply`; Node sends it unchanged to the original
+WhatsApp chat. AI and URL evidence collection remain entirely in Python.
 
-```bash
-curl -X POST http://127.0.0.1:8000/api/whatsapp/webhook \
-  -H 'Content-Type: application/json' \
-  -d '{"object":"whatsapp_business_account","entry":[{"id":"1","changes":[{"field":"messages",
-       "value":{"messaging_product":"whatsapp",
-       "contacts":[{"wa_id":"16505551234","profile":{"name":"Asha"}}],
-       "messages":[{"id":"wamid.ABC","from":"16505551234","timestamp":"1700000000",
-                    "type":"text","text":{"body":"claim your prize"}}]}}]}]}'
-```
-
-```json
-{
-  "status": "received",
-  "provider": "meta",
-  "accepted": 1,
-  "ignored": 0,
-  "messages": [
-    { "message_id": "wamid.ABC", "sender": "16505551234", "timestamp": "2023-11-14T22:13:20Z" }
-  ]
-}
-```
-
-Two deliberate behaviours:
-
-- **The acknowledgement never echoes the message body.** Guardian handles
-  content people believe is malicious; reflecting it into provider logs serves
-  no purpose.
-- **A valid envelope with nothing to analyse still returns 200** with
-  `accepted: 0`. Delivery receipts and unsupported media types land on the
-  same webhook, and providers disable endpoints that keep returning errors.
-  Only genuinely malformed bodies return 422.
-
-### Swapping providers
-
-Routes depend on the abstract `WhatsAppProvider`, never on a concrete adapter.
-Meta's Cloud API payload shape lives entirely in
-`app/services/whatsapp/meta.py`. To add another backend, implement the
-interface in `base.py` and register it in `registry.py`; selection is the
-`GUARDIAN_WHATSAPP_PROVIDER` env var.
+See **[whatsapp-bridge/README.md](whatsapp-bridge/README.md)** for setup, pairing,
+session storage, reconnection, and operational limits. The older webhook adapter
+remains in the repository for compatibility but is not part of this flow and
+requires no configuration. No new Meta Cloud API implementation is added.
 
 ## Live URL verification
 
@@ -161,10 +125,10 @@ A successful search with no matches has empty `results` and no `error`.
 untrusted source material for Gemma's risk estimate, not themselves a verdict.
 
 The app lifespan creates a shared SerpApi HTTP client, injects it into the
-processor used by the webhook, and closes it on shutdown. The synchronous
-webhook handler waits for these bounded lookups; there is no background queue
-or cross-delivery deduplication yet. Evidence stays internal rather than being
-reflected in the webhook acknowledgement. Existing callers of `process(message)`
+processor used by the API, and closes it on shutdown. The synchronous backend
+waits for these bounded lookups; the bridge has a small in-memory queue, not a
+durable job system. Raw evidence stays internal; only the formatted assessment
+is returned to the bridge. Existing callers of `process(message)`
 retain its normalized-message return value; callers needing evidence use
 `process_with_analysis(message)`. Neither method persists evidence yet.
 
@@ -265,9 +229,10 @@ Sender IDs, message IDs, and transport timestamps are omitted, but the text or
 URLs may themselves contain personal information or secrets. Choose a provider
 with appropriate retention policies, or self-host. Prompts, model responses,
 and credentials are not logged. Both HTTP pools are managed by the app lifespan
-and closed on shutdown. The webhook remains synchronous, with no background
-queue; API latency adds to delivery time. Model output stays internal, not in
-the webhook acknowledgement, and is not persisted or sent to WhatsApp yet.
+and closed on shutdown. Backend processing remains synchronous; API latency adds
+to delivery time. The bridge endpoint returns only the formatted risk estimate,
+short explanation, and recommended action for WhatsApp delivery. The full
+assessment and raw evidence are not exposed to Node or persisted.
 
 References: [Gemma prompt formatting](https://ai.google.dev/gemma/docs/core/prompt-structure),
 [Gemma 3 27B on OpenRouter](https://openrouter.ai/google/gemma-3-27b-it),
@@ -277,7 +242,7 @@ and [vLLM serving](https://docs.vllm.ai/en/latest/serving/online_serving/).
 ## Prerequisites
 
 - Python 3.11+
-- Node.js 18+
+- Node.js 20.19+ (required by the WhatsApp bridge)
 
 ## Setup
 
@@ -287,12 +252,13 @@ cd Guardian-HacktoberFest-26
 cp .env.example .env
 ```
 
-Both the backend and the frontend read this single root `.env`. Only
+The backend, frontend, and WhatsApp bridge read this single root `.env`. Only
 `VITE_`-prefixed variables reach the browser bundle — never put a secret
 behind a `VITE_` prefix.
 
-Set `GUARDIAN_WHATSAPP_VERIFY_TOKEN` to any string you choose; it is the
-shared secret you also enter in the provider's webhook settings.
+Set `GUARDIAN_WHATSAPP_BRIDGE_TOKEN` to a random secret of at least 32 characters
+(`openssl rand -hex 32`). Configure Gemma for generated replies and SerpApi for
+live URL evidence. No Meta credentials or public WhatsApp webhook are needed.
 
 ### Backend
 
@@ -318,6 +284,25 @@ npm run dev        # http://localhost:5173
 The dev server proxies `/api` to `http://127.0.0.1:8000`, so there is no CORS
 setup needed locally.
 
+### WhatsApp bridge
+
+With FastAPI running and the shared token and Gemma configured:
+
+```bash
+cd whatsapp-bridge
+npm ci
+npm run build
+npm start
+```
+
+Scan the terminal QR using WhatsApp's **Linked devices** screen. For pairing-code
+login, set `WHATSAPP_PAIRING_PHONE` to the account's country code + number (digits
+only). Authentication is saved in the gitignored `whatsapp-bridge/.auth/` folder.
+
+Baileys is unofficial: use a dedicated account with consenting users, respect
+WhatsApp's terms, and understand the risk of account restrictions. The transport
+is free/open-source, but hosted Gemma, SerpApi, and hosting may still cost money.
+
 ## Tests
 
 Run from the repo root:
@@ -335,6 +320,9 @@ pytest
 | `npm run dev` (in `frontend/`)                | run the Vite dev server      |
 | `npm run build` (in `frontend/`)              | type-check and build for prod |
 | `npm run lint` (in `frontend/`)               | lint the frontend            |
+| `npm run build` (in `whatsapp-bridge/`)       | type-check and compile the bridge |
+| `npm start` (in `whatsapp-bridge/`)           | run the compiled Baileys bridge |
+| `npm run dev` (in `whatsapp-bridge/`)         | run the bridge directly from TypeScript |
 
 ## Contributing
 

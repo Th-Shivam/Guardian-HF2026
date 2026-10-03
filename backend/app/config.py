@@ -45,7 +45,10 @@ class Settings(BaseSettings):
     # comma-separated form fail. Parsed via `cors_origin_list` below.
     cors_origins: str = "http://localhost:5173"
 
-    # ---- WhatsApp ----
+    # Shared only with the Baileys bridge; not a WhatsApp/Meta API credential.
+    whatsapp_bridge_token: SecretStr = SecretStr("")
+
+    # ---- WhatsApp (legacy webhook adapter, unused by the Baileys bridge) ----
     # Which provider adapter to use. See app.services.whatsapp.registry.
     whatsapp_provider: str = "meta"
 
