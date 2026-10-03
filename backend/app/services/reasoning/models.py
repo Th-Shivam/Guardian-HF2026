@@ -17,6 +17,13 @@ class RiskAssessment(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True, str_strip_whitespace=True)
 
+    response_language: Literal["english", "hindi", "hinglish"] = Field(
+        description=(
+            "Response style inferred from the buffered message/OCR content: English, "
+            "Hindi in Devanagari, or Hinglish in Roman script. Default to english "
+            "when there is insufficient language context."
+        ),
+    )
     risk_level: Literal["LOW", "MEDIUM", "HIGH"] = Field(
         description="Estimated risk given the supplied evidence; LOW does not mean verified safe."
     )
@@ -29,7 +36,10 @@ class RiskAssessment(BaseModel):
     reasons: list[Reason] = Field(
         min_length=1,
         max_length=6,
-        description="Concise reasons grounded only in the provided message, signals, and evidence.",
+        description=(
+            "Concise reasons in response_language, grounded only in the provided "
+            "message, signals, and evidence."
+        ),
     )
     evidence_used: list[EvidenceId] = Field(
         min_length=1,
@@ -39,10 +49,16 @@ class RiskAssessment(BaseModel):
     recommended_action: str = Field(
         min_length=1,
         max_length=600,
-        description="A safe next step; independently verify money, credential, and OTP requests.",
+        description=(
+            "A safe next step in response_language; independently verify money, "
+            "credential, and OTP requests."
+        ),
     )
     short_user_explanation: str = Field(
         min_length=1,
         max_length=500,
-        description="Brief, plain-language explanation that acknowledges uncertainty and avoids certainty claims.",
+        description=(
+            "Brief, plain-language explanation in response_language that acknowledges "
+            "uncertainty and avoids certainty claims."
+        ),
     )

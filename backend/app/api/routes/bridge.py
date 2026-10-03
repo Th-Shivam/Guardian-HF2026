@@ -12,6 +12,11 @@ from app.services.processing import InvalidMessageError, MessageProcessor
 
 router = APIRouter()
 _bearer = HTTPBearer(auto_error=False)
+_ACTION_LABELS = {
+    "english": "Recommended action",
+    "hindi": "सुझाया गया कदम",
+    "hinglish": "Agla surakshit kadam",
+}
 
 
 def require_bridge_token(
@@ -57,8 +62,8 @@ def receive_bridge_message(
     return BridgeReply(
         message_id=processed.message.message_id,
         reply=(
-            f"Guardian — estimated risk: {assessment.risk_level}\n\n"
+            f"Guardian — {assessment.risk_level} RISK\n\n"
             f"{assessment.short_user_explanation}\n\n"
-            f"Recommended action: {assessment.recommended_action}"
+            f"{_ACTION_LABELS[assessment.response_language]}: {assessment.recommended_action}"
         ),
     )

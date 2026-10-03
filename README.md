@@ -197,6 +197,7 @@ The assessment has exactly these required fields:
 
 | Field | Contract |
 | --- | --- |
+| `response_language` | `english`, `hindi` (Devanagari), or `hinglish` (Roman Hindi) |
 | `risk_level` | `LOW`, `MEDIUM`, or `HIGH` — an estimate, not a scam verdict |
 | `confidence` | Finite number in `[0, 1)`; model-estimated, not calibrated probability |
 | `reasons` | 1–6 concise, nonempty explanations grounded in supplied evidence |
@@ -210,6 +211,40 @@ first URL. `/message/text` identifies the forwarded text. Every cited pointer
 is checked against the evidence actually supplied. The full original
 `result.analysis` remains available; the reasoning layer does not rerun URL
 extraction, repeat SerpApi lookups, or replace deterministic signals.
+
+### Response language
+
+Gemma selects `response_language` in the same reasoning call; there is no extra
+language-detection service or translation API. All reasons, the short explanation,
+and recommended action must use that style:
+
+- English prose → English.
+- Hindi in Devanagari → Hindi in Devanagari.
+- Roman Hindi or mixed English/Hindi prose → natural Hinglish/Roman Hindi.
+- URL-only or insufficient text → English, unless other text/captions in the
+  same two-minute batch provide enough language context.
+
+Language selection uses the actual buffered message and OCR content, not English
+OCR labels, generated failure notices, signal explanations, or search results.
+URLs, domains, evidence titles, and technical identifiers are not translated.
+The WhatsApp heading remains `Guardian — HIGH RISK`, `MEDIUM RISK`, or `LOW RISK`;
+the explanation and action label follow the selected language. Existing transport
+error/availability notices stay unchanged when no assessment is available.
+
+OCR itself is unchanged and still uses Tesseract's English language data; this
+feature does not add Devanagari OCR recognition. Any recognized text follows the
+same language-selection rules. No risk heuristics or evidence logic changed.
+
+For a manual check, send each of these **as a separate batch** from another
+WhatsApp account. Wait two minutes of inactivity and receive the reply before
+sending the next, so the languages do not get combined:
+
+1. English: `Someone is asking for my password to unlock my account. What should I do?`
+2. Hindi: `कोई मेरा खाता खोलने के लिए मेरा पासवर्ड माँग रहा है। मुझे क्या करना चाहिए?`
+3. Hinglish: `Koi mera account unlock karne ke liye password maang raha hai. Main kya karun?`
+
+Expect the matching language/script for each explanation and action, with the
+same English risk-label format. Risk ratings are model-generated, not fixed.
 
 The safety prompt explicitly forbids certainty claims and invented evidence,
 requires reasoning from supplied observations, and recommends independent
