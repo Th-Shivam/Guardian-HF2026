@@ -70,7 +70,7 @@ session locally, and sends normalized `GuardianMessage` fields to FastAPI using
 a shared bearer token. FastAPI formats the generated short explanation and
 recommended action into a `reply`; Node sends it unchanged to the original
 WhatsApp chat. Image messages are downloaded temporarily for local Tesseract OCR;
-recognized text joins the same two-minute sender buffer as normal text. Images
+recognized text joins the same one-minute sender buffer as normal text. Images
 are deleted after OCR, and extracted URLs use the existing backend analysis.
 Voice notes/audio attachments use ElevenLabs STT (`ELEVENLABS_API_KEY`, configurable
 `ELEVENLABS_STT_MODEL=scribe_v2`) with automatic language detection. Local temporary
@@ -229,7 +229,7 @@ and recommended action must use that style:
 - Hindi in Devanagari → Hindi in Devanagari.
 - Roman Hindi or mixed English/Hindi prose → natural Hinglish/Roman Hindi.
 - URL-only or insufficient text → English, unless other text/captions in the
-  same two-minute batch provide enough language context.
+  same one-minute batch provide enough language context.
 
 Language selection uses the actual buffered message and OCR content, not English
 OCR labels, generated failure notices, signal explanations, or search results.
@@ -251,7 +251,7 @@ feature does not add Devanagari OCR recognition. Any recognized text follows the
 same language-selection rules. No risk heuristics or evidence logic changed.
 
 For a manual check, send each of these **as a separate batch** from another
-WhatsApp account. Wait two minutes of inactivity and receive the reply before
+WhatsApp account. Wait one minute of inactivity and receive the reply before
 sending the next, so the languages do not get combined:
 
 1. English: `Someone is asking for my password to unlock my account. What should I do?`

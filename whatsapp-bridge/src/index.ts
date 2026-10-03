@@ -18,7 +18,7 @@ import { loadConfig } from './config.js'
 import { extractImageText } from './ocr.js'
 import { transcribeVoice, VoiceTranscriptionError, VOICE_UNAVAILABLE } from './voice.js'
 
-const BUFFER_INACTIVITY_MS = 2 * 60 * 1000
+const BUFFER_INACTIVITY_MS = 60 * 1000
 const MAX_QUEUE = 100
 const MAX_CACHE = 2000
 const SEEN_TTL_MS = 24 * 60 * 60 * 1000

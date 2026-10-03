@@ -8,7 +8,7 @@ transcriptions) to FastAPI, and sends FastAPI's reply to the same sender.
 
 ```text
 WhatsApp private text, image, or voice/audio
-  -> Baileys -> local Tesseract OCR / ElevenLabs STT -> two-minute sender buffer
+  -> Baileys -> local Tesseract OCR / ElevenLabs STT -> one-minute sender buffer
   -> normalized GuardianMessage
   -> POST /api/bridge/messages
   -> existing Python signals + URL analysis + SerpApi + Gemma
@@ -131,13 +131,13 @@ The bridge never deletes credentials or logs out the account automatically.
   wrappers. Only accepted images/audio are downloaded for OCR/STT.
 - The normalized payload uses `message_id`, `sender_id` (the original chat JID),
   `text`, `received_at` (UTC bridge receipt time), and `source: "whatsapp"`.
-- Each sender has an independent **two-minute inactivity buffer**. Every new,
+- Each sender has an independent **one-minute inactivity buffer**. Every new,
   non-duplicate text, image, or voice/audio resets only that sender's timer. When
   it expires, texts are joined in arrival order with `\n\n` and queued as one
   Guardian message, keeping the first message's ID and receipt time. Single
-  messages also wait two minutes. Images and audio reserve their positions
+  messages also wait one minute. Images and audio reserve their positions
   immediately, before asynchronous OCR/STT, so later text cannot overtake them.
-  If a batch still has pending OCR/STT after two quiet minutes, flushing waits
+  If a batch still has pending OCR/STT after one quiet minute, flushing waits
   for it; completion does not restart the inactivity timer. The buffer then
   clears for the next batch.
 - Waiting buffers do not block other senders. Backend processing remains
@@ -226,9 +226,9 @@ prevent cleanup; do not back up temporary directories containing user media.
    the link or include any real credentials.
 
 3. Send it to the Guardian account as a **photo/image**, not a document or
-   view-once item. Optionally send `Can you check this screenshot?` within two
-   minutes to confirm mixed image/text batching. Stop sending and wait **two
-   minutes after the last message**, then allow time for backend reasoning.
+   view-once item. Optionally send `Can you check this screenshot?` within one
+   minute to confirm mixed image/text batching. Stop sending and wait **one
+   minute after the last message**, then allow time for backend reasoning.
 
 4. In the bridge terminal, look for `Image OCR completed: text extracted.` and
    `Flushed WhatsApp batch to queue: ... messages=1` (or `messages=2` with the
@@ -238,7 +238,7 @@ prevent cleanup; do not back up temporary directories containing user media.
    WhatsApp, and the original sending account should receive Guardian's generated
    risk explanation and recommended action. The exact risk rating is not fixed.
 
-5. Separately, send a blank image and wait another two quiet minutes. Expect
+5. Separately, send a blank image and wait another quiet minute. Expect
    `Image OCR completed: no useful text detected.` followed by a normal pipeline
    request and generated reply. No image should be retained after OCR completes.
 
@@ -273,7 +273,7 @@ reply language from the resulting batch, not the audio itself.
 - Each recording has a **10 MiB download cap** and a **120-second overall work
   deadline** once its turn starts. STT runs one recording at a time, separately
   from OCR, without blocking incoming text or other sender timers. A busy STT
-  queue can extend a voice batch beyond its two-minute inactivity period.
+  queue can extend a voice batch beyond its one-minute inactivity period.
 - Empty, whitespace/punctuation-only, invalid, or failed transcripts never become
   fabricated evidence. The batch gets a friendly English transport notice asking
   for clearer audio/text or a later retry. If nothing readable remains, no backend
@@ -310,7 +310,7 @@ no real OTPs, passwords, payment requests, or suspicious live links are needed.
    Use **another WhatsApp account** to send to Guardian's account; own messages
    are ignored. Use the WhatsApp microphone for each recording below. Send each
    language example as a **separate batch**: after each note, stop sending for
-   two minutes, allow additional STT/backend time, and wait for the reply before
+   one minute, allow additional STT/backend time, and wait for the reply before
    starting the next example.
 
 3. **English:** record: “Someone says my bank account will be blocked today unless
@@ -336,14 +336,14 @@ no real OTPs, passwords, payment requests, or suspicious live links are needed.
    `https://example.com/verify`, FastAPI should report `1 URL(s)` and a SerpApi
    lookup. Speech may instead produce words such as “example dot com”; those are
    **not rewritten into URLs**. To check the URL path reliably, repeat the note
-   in a fresh batch and send `https://example.com/verify` as text within two
-   minutes. Stop sending; expect one batch with `messages=2` and a URL lookup.
+   in a fresh batch and send `https://example.com/verify` as text within one
+   minute. Stop sending; expect one batch with `messages=2` and a URL lookup.
 
 7. **Mixed ordering:** in a fresh batch send, in this order, a voice note saying
    “First, someone requested a payment,” the text `Second, please check this`,
    a clear screenshot saying `Third: never share an OTP`, and another voice note
    saying “Fourth, should I verify through the official bank app?” Keep gaps
-   below two minutes, then wait two quiet minutes. Expect a single `messages=4`
+   below one minute, then wait one quiet minute. Expect a single `messages=4`
    flush after all OCR/STT completes and one normal Guardian assessment. For an
    exact payload-order check, inspect `job.message.text` at `requestReply` in a
    local debugger: voice → text → image OCR → voice, with the documented labels.
@@ -358,7 +358,7 @@ no real OTPs, passwords, payment requests, or suspicious live links are needed.
    ELEVENLABS_API_KEY=invalid-for-manual-check npm start
    ```
 
-   Send a voice note, wait two quiet minutes, and expect a friendly unavailable
+   Send a voice note, wait one quiet minute, and expect a friendly unavailable
    notice plus a sanitized diagnostic, not a crash. Send normal text in a new
    batch and verify it still works. Stop this process and run `npm start` normally
    to restore the real `.env` key. This does not modify `.env`.
