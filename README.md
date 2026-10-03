@@ -7,8 +7,9 @@ analyses it and replies with a simple risk assessment and one safe action to
 take.
 
 > **Status: WhatsApp Web bridge + evidence-grounded reasoning.** A small Baileys
-> bridge receives private text messages and sends Guardian's reply back over
-> WhatsApp Web. FastAPI owns the existing signal, URL, SerpApi, and Gemma pipeline.
+> bridge receives private text and image messages, extracts screenshot text with
+> local Tesseract OCR, and sends Guardian's reply back over WhatsApp Web. FastAPI
+> owns the existing signal, URL, SerpApi, and Gemma pipeline.
 > No Meta Cloud API is used by the bridge. The React frontend remains a placeholder;
 > a database is not built yet.
 
@@ -67,7 +68,10 @@ The bridge authenticates with a QR or pairing code, retains its linked-device
 session locally, and sends normalized `GuardianMessage` fields to FastAPI using
 a shared bearer token. FastAPI formats the generated short explanation and
 recommended action into a `reply`; Node sends it unchanged to the original
-WhatsApp chat. AI and URL evidence collection remain entirely in Python.
+WhatsApp chat. Image messages are downloaded temporarily for local Tesseract OCR;
+recognized text joins the same two-minute sender buffer as normal text. Images
+are deleted after OCR, and extracted URLs use the existing backend analysis.
+Risk reasoning and URL evidence collection remain entirely in Python.
 
 See **[whatsapp-bridge/README.md](whatsapp-bridge/README.md)** for setup, pairing,
 session storage, reconnection, and operational limits. The older webhook adapter
@@ -243,6 +247,7 @@ and [vLLM serving](https://docs.vllm.ai/en/latest/serving/online_serving/).
 
 - Python 3.11+
 - Node.js 20.19+ (required by the WhatsApp bridge)
+- Tesseract CLI with English (`eng`) language data for local screenshot OCR
 
 ## Setup
 

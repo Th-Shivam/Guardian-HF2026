@@ -15,6 +15,7 @@ import qrcode from 'qrcode-terminal'
 
 import { requestReply, type GuardianMessage } from './backend.js'
 import { loadConfig } from './config.js'
+import { extractImageText } from './ocr.js'
 
 const BUFFER_INACTIVITY_MS = 2 * 60 * 1000
 const MAX_QUEUE = 100
@@ -30,22 +31,35 @@ interface Job {
 interface SenderBuffer {
   messages: [GuardianMessage, ...GuardianMessage[]]
   timer: NodeJS.Timeout
+  pendingImages: number
+  expired: boolean
 }
 
-function normalize(message: WAMessage): GuardianMessage | undefined {
+interface IncomingMessage {
+  message: GuardianMessage
+  isImage: boolean
+  caption: string
+}
+
+function normalize(message: WAMessage): IncomingMessage | undefined {
   const { id, remoteJid, fromMe } = message.key
   // Only private chats: no self replies, groups, newsletters, or broadcasts.
   // Modern WhatsApp may identify a sender with a LID instead of a phone JID.
   if (fromMe || !id || !remoteJid || !/^\d+(?::\d+)?@(s\.whatsapp\.net|lid)$/.test(remoteJid)) return
   const content = normalizeMessageContent(message.message)
-  const text = (content?.conversation ?? content?.extendedTextMessage?.text)?.trim()
-  if (!text || text.length > 4096) return
+  const isImage = Boolean(content?.imageMessage)
+  const text = (content?.conversation ?? content?.extendedTextMessage?.text)?.trim() ?? ''
+  if (!isImage && (!text || text.length > 4096)) return
   return {
-    message_id: id,
-    sender_id: remoteJid,
-    text,
-    received_at: new Date().toISOString(), // bridge receipt time, not an inferred timezone
-    source: 'whatsapp',
+    message: {
+      message_id: id,
+      sender_id: remoteJid,
+      text, // images are filled by OCR before their batch can flush
+      received_at: new Date().toISOString(), // bridge receipt time, not an inferred timezone
+      source: 'whatsapp',
+    },
+    isImage,
+    caption: content?.imageMessage?.caption?.trim() ?? '',
   }
 }
 
@@ -79,6 +93,9 @@ async function main(): Promise<void> {
   let reconnectAttempt = 0
   let reconnectTimer: NodeJS.Timeout | undefined
   let credentialWrites = Promise.resolve()
+  // One local OCR process at a time; text reception and sender timers keep
+  // running. Each image reserves its position in its buffer before this work.
+  let imageWork = Promise.resolve()
 
   async function stop(exitCode: number): Promise<void> {
     if (stopping) return
@@ -90,6 +107,7 @@ async function main(): Promise<void> {
     shutdown.abort()
     queue.length = 0
     socket?.end(undefined) // disconnect, do not revoke the saved linked device
+    await imageWork // allow aborted downloads/OCR to delete temporary files
     await credentialWrites
     process.exitCode = exitCode
   }
@@ -107,6 +125,10 @@ async function main(): Promise<void> {
   function flushSender(senderId: string): void {
     const buffer = buffers.get(senderId)
     if (!buffer || stopping) return
+    if (buffer.pendingImages > 0) {
+      buffer.expired = true
+      return
+    }
     buffers.delete(senderId)
     // Transfer the reserved buffer slot to the existing queue. Removing the
     // buffer first lets the sender start a fresh batch while this one runs.
@@ -203,7 +225,7 @@ async function main(): Promise<void> {
         if (update.connection === 'open') {
           connected = true
           reconnectAttempt = 0
-          console.info('WhatsApp connected. Waiting for private text messages.')
+          console.info('WhatsApp connected. Waiting for private text and image messages.')
           void drain()
         } else if (update.connection === 'close') {
           connected = false
@@ -233,11 +255,12 @@ async function main(): Promise<void> {
           seen.delete(id)
         }
         for (const incoming of event.messages) {
-          const message = normalize(incoming)
-          if (!message) continue
+          const normalized = normalize(incoming)
+          if (!normalized) continue
+          const { message, isImage, caption } = normalized
           const id = `${message.sender_id}:${message.message_id}`
           if (seen.has(id)) continue
-          const buffer = buffers.get(message.sender_id)
+          let buffer = buffers.get(message.sender_id)
           // Reserve a queue slot per waiting sender so an accepted batch is
           // not dropped when its inactivity timer expires.
           if (!buffer && queue.length + buffers.size >= MAX_QUEUE) {
@@ -248,14 +271,40 @@ async function main(): Promise<void> {
           if (buffer) {
             clearTimeout(buffer.timer)
             buffer.messages.push(message)
+            buffer.expired = false
             buffer.timer = setTimeout(() => flushSender(message.sender_id), BUFFER_INACTIVITY_MS)
           } else {
-            buffers.set(message.sender_id, {
+            buffer = {
               messages: [message],
               timer: setTimeout(() => flushSender(message.sender_id), BUFFER_INACTIVITY_MS),
+              pendingImages: 0,
+              expired: false,
+            }
+            buffers.set(message.sender_id, buffer)
+          }
+          console.info(`Buffering WhatsApp messages: sender=${message.sender_id} messages=${buffer.messages.length}`)
+          if (isImage) {
+            const imageBuffer = buffer
+            imageBuffer.pendingImages += 1
+            // Duplicate protection and slot reservation happen before any
+            // asynchronous download, keeping image/text arrival order intact.
+            imageWork = imageWork.then(async () => {
+              if (stopping) return
+              try {
+                message.text = await extractImageText(incoming, shutdown.signal)
+              } catch {
+                // Never log SDK errors, OCR output, media URLs, or file paths.
+                console.error('Image OCR unavailable: check Tesseract/eng installation, media access, size, and time limits.')
+                message.text = '[Image OCR unavailable]\nThe image could not be read. Its contents are unknown; this is not evidence that it is safe.'
+              } finally {
+                if (caption) message.text += `\n\n[Image caption]\n${caption}`
+                imageBuffer.pendingImages -= 1
+                if (!stopping && imageBuffer.expired && buffers.get(message.sender_id) === imageBuffer) {
+                  flushSender(message.sender_id)
+                }
+              }
             })
           }
-          console.info(`Buffering WhatsApp messages: sender=${message.sender_id} messages=${buffer ? buffer.messages.length : 1}`)
         }
       })
     } catch {
