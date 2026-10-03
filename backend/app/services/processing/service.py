@@ -1,0 +1,72 @@
+"""The internal message-processing service.
+
+Everything that arrives from any transport funnels through here before it is
+analysed, stored, or answered. Today it validates and normalises and logs that
+a message was received; analysis, URL checks and replies are composed onto this
+seam later.
+
+Deliberately independent of WhatsApp and FastAPI: this module imports neither,
+so it can be exercised on its own and driven by anything.
+"""
+
+from datetime import timezone
+
+from app.core.logging import get_logger
+from app.services.processing.errors import InvalidMessageError
+from app.services.processing.models import GuardianMessage
+
+logger = get_logger(__name__)
+
+
+class MessageProcessor:
+    """Validates and normalises inbound messages.
+
+    Stateless today. As the pipeline grows this is where the AI client, the URL
+    scanner and the evidence store get wired in, which is why callers depend on
+    the class rather than on the individual steps.
+    """
+
+    def process(self, message: GuardianMessage) -> GuardianMessage:
+        """Validate and normalise one inbound message.
+
+        Args:
+            message: A structurally valid message, as produced by a provider
+                adapter.
+
+        Returns:
+            The same message with normalised text and a UTC timestamp.
+
+        Raises:
+            InvalidMessageError: the message broke a business rule — an empty
+                body, or a timestamp with no timezone to trust.
+        """
+        normalized = self._normalize(message)
+        # Log identifiers and provenance only. The body is content a user may
+        # believe is malicious; there is no reason to copy it into our logs.
+        logger.info(
+            "Guardian received message %s from %s via %s",
+            normalized.message_id,
+            normalized.sender_id,
+            normalized.source,
+        )
+        return normalized
+
+    @staticmethod
+    def _normalize(message: GuardianMessage) -> GuardianMessage:
+        """Apply the pipeline's normalization rules or raise."""
+        text = message.text.strip()
+        if not text:
+            raise InvalidMessageError(
+                f"Message {message.message_id!r} has an empty body; nothing to process."
+            )
+
+        received_at = message.received_at
+        if received_at.tzinfo is None:
+            # Guessing a timezone would silently corrupt the audit trail later.
+            raise InvalidMessageError(
+                f"Message {message.message_id!r} has a naive timestamp; refusing to guess a timezone."
+            )
+
+        return message.model_copy(
+            update={"text": text, "received_at": received_at.astimezone(timezone.utc)}
+        )

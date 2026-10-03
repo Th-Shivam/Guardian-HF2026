@@ -14,13 +14,19 @@ from fastapi.responses import PlainTextResponse
 
 from app.core.logging import get_logger
 from app.schemas.whatsapp import AcknowledgedMessage, VerificationRequest, WebhookAck
+from app.services.processing import InvalidMessageError, MessageProcessor
 from app.services.whatsapp import WhatsAppProvider, get_whatsapp_provider
+from app.services.whatsapp.mapping import to_guardian_message
 
 logger = get_logger(__name__)
 
 router = APIRouter()
 
 ProviderDep = Annotated[WhatsAppProvider, Depends(get_whatsapp_provider)]
+
+#: Stateless, so one instance serves every request. Promoted to a dependency
+#: when the processor starts holding clients (AI, URL scanner, store).
+_processor = MessageProcessor()
 
 _EXAMPLE_PAYLOAD: dict[str, Any] = {
     "object": "whatsapp_business_account",
@@ -90,34 +96,50 @@ def receive_webhook(
     provider: ProviderDep,
     payload: Annotated[dict[str, Any], Body(examples=[_EXAMPLE_PAYLOAD])],
 ) -> WebhookAck:
-    """Accept a webhook delivery and acknowledge what was extracted.
+    """Accept a webhook delivery, run it through the pipeline, and acknowledge.
 
-    A well-formed delivery that carries no user messages (delivery receipts,
-    unsupported media types) is still a success: it returns 200 with
-    ``accepted: 0``. Providers retry on non-2xx and eventually disable a
-    webhook that keeps failing, so only genuinely malformed bodies error.
+    Each extracted message is normalised into Guardian's internal model and
+    handed to the message processor. A well-formed delivery that carries
+    nothing to analyse — no messages at all, or a message that fails
+    processing — is still a success: it returns 200 with a reduced ``accepted``
+    count. Providers retry on non-2xx and eventually disable a webhook that
+    keeps failing, so only genuinely malformed bodies error.
 
     Nothing is analysed or stored yet.
     """
     parsed = provider.parse_inbound(payload)
 
-    logger.info(
-        "WhatsApp webhook: provider=%s accepted=%d ignored=%d",
-        provider.name,
-        len(parsed.messages),
-        parsed.ignored,
-    )
+    accepted: list[AcknowledgedMessage] = []
+    ignored = parsed.ignored
 
-    return WebhookAck(
-        provider=provider.name,
-        accepted=len(parsed.messages),
-        ignored=parsed.ignored,
-        messages=[
+    for message in parsed.messages:
+        try:
+            _processor.process(to_guardian_message(message))
+        except InvalidMessageError as exc:
+            # Deliberate: a message we cannot use is skipped, not fatal. The
+            # reason is logged server-side and never reflected to the caller.
+            logger.warning("Skipping unprocessable message: %s", exc)
+            ignored += 1
+            continue
+
+        accepted.append(
             AcknowledgedMessage(
                 message_id=message.message_id,
                 sender=message.sender,
                 timestamp=message.timestamp,
             )
-            for message in parsed.messages
-        ],
+        )
+
+    logger.info(
+        "WhatsApp webhook: provider=%s accepted=%d ignored=%d",
+        provider.name,
+        len(accepted),
+        ignored,
+    )
+
+    return WebhookAck(
+        provider=provider.name,
+        accepted=len(accepted),
+        ignored=ignored,
+        messages=accepted,
     )
