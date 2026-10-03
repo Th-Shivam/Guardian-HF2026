@@ -7,8 +7,9 @@ analyses it and replies with a simple risk assessment and one safe action to
 take.
 
 > **Status: WhatsApp Web bridge + evidence-grounded reasoning.** A small Baileys
-> bridge receives private text and image messages, extracts screenshot text with
-> local Tesseract OCR, and sends Guardian's reply back over WhatsApp Web. FastAPI
+> bridge receives private text, image, and voice/audio messages, extracts screenshot
+> text with local Tesseract OCR, transcribes audio with ElevenLabs, and sends
+> Guardian's reply back over WhatsApp Web. FastAPI
 > owns the existing signal, URL, SerpApi, and Gemma pipeline.
 > No Meta Cloud API is used by the bridge. The React frontend remains a placeholder;
 > a database is not built yet.
@@ -71,6 +72,12 @@ recommended action into a `reply`; Node sends it unchanged to the original
 WhatsApp chat. Image messages are downloaded temporarily for local Tesseract OCR;
 recognized text joins the same two-minute sender buffer as normal text. Images
 are deleted after OCR, and extracted URLs use the existing backend analysis.
+Voice notes/audio attachments use ElevenLabs STT (`ELEVENLABS_API_KEY`, configurable
+`ELEVENLABS_STT_MODEL=scribe_v2`) with automatic language detection. Local temporary
+audio is deleted after processing; transcripts enter that same buffer in arrival
+order. Empty/failed voice notes get a friendly notice, appended to the unmodified
+backend reply when other readable content exists. See the bridge README for audio
+privacy limitations and English/Hindi/Hinglish manual checks.
 Risk reasoning and URL evidence collection remain entirely in Python.
 
 See **[whatsapp-bridge/README.md](whatsapp-bridge/README.md)** for setup, pairing,

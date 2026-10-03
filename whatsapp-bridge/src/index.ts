@@ -16,6 +16,7 @@ import qrcode from 'qrcode-terminal'
 import { requestReply, type GuardianMessage } from './backend.js'
 import { loadConfig } from './config.js'
 import { extractImageText } from './ocr.js'
+import { transcribeVoice, VoiceTranscriptionError, VOICE_UNAVAILABLE } from './voice.js'
 
 const BUFFER_INACTIVITY_MS = 2 * 60 * 1000
 const MAX_QUEUE = 100
@@ -26,18 +27,22 @@ const UNAVAILABLE = 'Guardian could not complete this check. No risk assessment 
 interface Job {
   message: GuardianMessage
   reply?: string
+  voiceNotice?: string
 }
 
 interface SenderBuffer {
   messages: [GuardianMessage, ...GuardianMessage[]]
   timer: NodeJS.Timeout
   pendingImages: number
+  pendingVoices: number
+  voiceNotices: Set<string>
   expired: boolean
 }
 
 interface IncomingMessage {
   message: GuardianMessage
   isImage: boolean
+  isAudio: boolean
   caption: string
 }
 
@@ -48,17 +53,19 @@ function normalize(message: WAMessage): IncomingMessage | undefined {
   if (fromMe || !id || !remoteJid || !/^\d+(?::\d+)?@(s\.whatsapp\.net|lid)$/.test(remoteJid)) return
   const content = normalizeMessageContent(message.message)
   const isImage = Boolean(content?.imageMessage)
+  const isAudio = !isImage && Boolean(content?.audioMessage) // PTT notes and audio attachments
   const text = (content?.conversation ?? content?.extendedTextMessage?.text)?.trim() ?? ''
-  if (!isImage && (!text || text.length > 4096)) return
+  if (!isImage && !isAudio && (!text || text.length > 4096)) return
   return {
     message: {
       message_id: id,
       sender_id: remoteJid,
-      text, // images are filled by OCR before their batch can flush
+      text, // media is filled by OCR/STT before its batch can flush
       received_at: new Date().toISOString(), // bridge receipt time, not an inferred timezone
       source: 'whatsapp',
     },
     isImage,
+    isAudio,
     caption: content?.imageMessage?.caption?.trim() ?? '',
   }
 }
@@ -96,6 +103,7 @@ async function main(): Promise<void> {
   // One local OCR process at a time; text reception and sender timers keep
   // running. Each image reserves its position in its buffer before this work.
   let imageWork = Promise.resolve()
+  let voiceWork = Promise.resolve() // STT stays separate from the existing OCR work
 
   async function stop(exitCode: number): Promise<void> {
     if (stopping) return
@@ -107,7 +115,7 @@ async function main(): Promise<void> {
     shutdown.abort()
     queue.length = 0
     socket?.end(undefined) // disconnect, do not revoke the saved linked device
-    await imageWork // allow aborted downloads/OCR to delete temporary files
+    await Promise.all([imageWork, voiceWork]) // wait for temporary image/audio cleanup
     await credentialWrites
     process.exitCode = exitCode
   }
@@ -125,18 +133,24 @@ async function main(): Promise<void> {
   function flushSender(senderId: string): void {
     const buffer = buffers.get(senderId)
     if (!buffer || stopping) return
-    if (buffer.pendingImages > 0) {
+    if (buffer.pendingImages > 0 || buffer.pendingVoices > 0) {
       buffer.expired = true
       return
     }
     buffers.delete(senderId)
+    // Failed voice slots stay empty, not fabricated evidence. Other messages
+    // keep their original order and still receive the normal risk assessment.
+    const readable = buffer.messages.filter(message => message.text.trim())
+    const voiceNotice = [...buffer.voiceNotices].join('\n')
     // Transfer the reserved buffer slot to the existing queue. Removing the
     // buffer first lets the sender start a fresh batch while this one runs.
     queue.push({
       message: {
         ...buffer.messages[0],
-        text: buffer.messages.map(message => message.text).join('\n\n'),
+        text: readable.map(message => message.text).join('\n\n'),
       },
+      reply: readable.length ? undefined : voiceNotice,
+      voiceNotice: readable.length ? voiceNotice : undefined,
     })
     console.info(`Flushed WhatsApp batch to queue: sender=${senderId} messages=${buffer.messages.length}`)
     void drain()
@@ -156,6 +170,7 @@ async function main(): Promise<void> {
             console.error('Guardian request failed; sending an availability notice, not a risk assessment.')
             job.reply = UNAVAILABLE
           }
+          if (job.voiceNotice) job.reply += `\n\n${job.voiceNotice}`
         }
         // Retain a completed reply across a reconnect without calling AI again.
         if (!connected || !socket || stopping) return
@@ -225,7 +240,7 @@ async function main(): Promise<void> {
         if (update.connection === 'open') {
           connected = true
           reconnectAttempt = 0
-          console.info('WhatsApp connected. Waiting for private text and image messages.')
+          console.info('WhatsApp connected. Waiting for private text, image, and voice messages.')
           void drain()
         } else if (update.connection === 'close') {
           connected = false
@@ -257,7 +272,7 @@ async function main(): Promise<void> {
         for (const incoming of event.messages) {
           const normalized = normalize(incoming)
           if (!normalized) continue
-          const { message, isImage, caption } = normalized
+          const { message, isImage, isAudio, caption } = normalized
           const id = `${message.sender_id}:${message.message_id}`
           if (seen.has(id)) continue
           let buffer = buffers.get(message.sender_id)
@@ -278,6 +293,8 @@ async function main(): Promise<void> {
               messages: [message],
               timer: setTimeout(() => flushSender(message.sender_id), BUFFER_INACTIVITY_MS),
               pendingImages: 0,
+              pendingVoices: 0,
+              voiceNotices: new Set(),
               expired: false,
             }
             buffers.set(message.sender_id, buffer)
@@ -300,6 +317,33 @@ async function main(): Promise<void> {
                 if (caption) message.text += `\n\n[Image caption]\n${caption}`
                 imageBuffer.pendingImages -= 1
                 if (!stopping && imageBuffer.expired && buffers.get(message.sender_id) === imageBuffer) {
+                  flushSender(message.sender_id)
+                }
+              }
+            })
+          }
+          if (isAudio) {
+            const voiceBuffer = buffer
+            voiceBuffer.pendingVoices += 1
+            // Reserve the original slot before STT, just as for images. Neither
+            // completion order nor later text can reorder the buffered content.
+            voiceWork = voiceWork.then(async () => {
+              if (stopping) return
+              try {
+                message.text = await transcribeVoice(incoming, config, shutdown.signal)
+              } catch (error) {
+                message.text = ''
+                if (!stopping) {
+                  console.error(error instanceof VoiceTranscriptionError
+                    ? error.message
+                    : 'Voice transcription failed; check ElevenLabs configuration, connectivity, and limits.')
+                  voiceBuffer.voiceNotices.add(error instanceof VoiceTranscriptionError
+                    ? error.userReply
+                    : VOICE_UNAVAILABLE)
+                }
+              } finally {
+                voiceBuffer.pendingVoices -= 1
+                if (!stopping && voiceBuffer.expired && buffers.get(message.sender_id) === voiceBuffer) {
                   flushSender(message.sender_id)
                 }
               }

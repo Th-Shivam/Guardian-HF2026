@@ -6,6 +6,8 @@ export interface BridgeConfig {
   token: string
   pairingPhone: string
   authDirectory: string
+  elevenLabsApiKey: string
+  elevenLabsSttModel: string
 }
 
 export function loadConfig(): BridgeConfig {
@@ -47,5 +49,8 @@ export function loadConfig(): BridgeConfig {
     token,
     pairingPhone,
     authDirectory: fileURLToPath(new URL('../.auth/', import.meta.url)),
+    // An unset key disables only voice transcription, not text or image OCR.
+    elevenLabsApiKey: process.env.ELEVENLABS_API_KEY?.trim() ?? '',
+    elevenLabsSttModel: process.env.ELEVENLABS_STT_MODEL?.trim() || 'scribe_v2',
   }
 }
