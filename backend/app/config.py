@@ -9,6 +9,7 @@ backend config never collides with frontend (``VITE_``) config in the shared
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import Field, HttpUrl, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # backend/app/config.py -> backend/app -> backend -> <repo root>
@@ -50,6 +51,30 @@ class Settings(BaseSettings):
     # Intentionally empty by default: an unset token must fail loudly rather
     # than silently accept whatever the caller sends.
     whatsapp_verify_token: str = ""
+
+    # ---- URL verification (SerpApi) ----
+    # API key for https://serpapi.com. Empty by default: live verification is
+    # opt-in, and an unconfigured deployment simply skips it rather than
+    # erroring. Get a key at https://serpapi.com/manage-api-key.
+    serpapi_api_key: SecretStr = SecretStr("")
+    serpapi_endpoint: HttpUrl = HttpUrl("https://serpapi.com/search.json")
+    serpapi_timeout: float = Field(default=10.0, gt=0, le=30, allow_inf_nan=False)
+    # Cap retained results from the first page; no pagination or extra searches.
+    serpapi_results_per_domain: int = Field(default=5, ge=1, le=10)
+    # Bound paid requests from a single message, including failed lookups.
+    serpapi_max_domains: int = Field(default=5, ge=1, le=20)
+
+    @field_validator("serpapi_endpoint")
+    @classmethod
+    def _secure_serpapi_endpoint(cls, value: HttpUrl) -> HttpUrl:
+        if value.scheme != "https" or value.username or value.password or value.query or value.fragment:
+            raise ValueError("SerpApi endpoint must use HTTPS without credentials, query, or fragment.")
+        return value
+
+    @property
+    def url_verification_enabled(self) -> bool:
+        """True when live URL verification is configured and usable."""
+        return bool(self.serpapi_api_key.get_secret_value().strip())
 
     @property
     def cors_origin_list(self) -> list[str]:

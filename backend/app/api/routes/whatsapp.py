@@ -12,6 +12,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Body, Depends, Query
 from fastapi.responses import PlainTextResponse
 
+from app.api.dependencies import get_message_processor
 from app.core.logging import get_logger
 from app.schemas.whatsapp import AcknowledgedMessage, VerificationRequest, WebhookAck
 from app.services.processing import InvalidMessageError, MessageProcessor
@@ -23,10 +24,7 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 ProviderDep = Annotated[WhatsAppProvider, Depends(get_whatsapp_provider)]
-
-#: Stateless, so one instance serves every request. Promoted to a dependency
-#: when the processor starts holding clients (AI, URL scanner, store).
-_processor = MessageProcessor()
+ProcessorDep = Annotated[MessageProcessor, Depends(get_message_processor)]
 
 _EXAMPLE_PAYLOAD: dict[str, Any] = {
     "object": "whatsapp_business_account",
@@ -94,6 +92,7 @@ def verify_webhook(
 )
 def receive_webhook(
     provider: ProviderDep,
+    processor: ProcessorDep,
     payload: Annotated[dict[str, Any], Body(examples=[_EXAMPLE_PAYLOAD])],
 ) -> WebhookAck:
     """Accept a webhook delivery, run it through the pipeline, and acknowledge.
@@ -105,7 +104,9 @@ def receive_webhook(
     count. Providers retry on non-2xx and eventually disable a webhook that
     keeps failing, so only genuinely malformed bodies error.
 
-    Nothing is analysed or stored yet.
+    Offline signals and configured SerpApi evidence are collected internally.
+    The acknowledgement contains neither message content nor search evidence;
+    nothing is persisted and no final verdict or outbound reply is produced.
     """
     parsed = provider.parse_inbound(payload)
 
@@ -114,7 +115,7 @@ def receive_webhook(
 
     for message in parsed.messages:
         try:
-            _processor.process(to_guardian_message(message))
+            processed = processor.process_with_analysis(to_guardian_message(message))
         except InvalidMessageError as exc:
             # Deliberate: a message we cannot use is skipped, not fatal. The
             # reason is logged server-side and never reflected to the caller.
@@ -124,9 +125,9 @@ def receive_webhook(
 
         accepted.append(
             AcknowledgedMessage(
-                message_id=message.message_id,
-                sender=message.sender,
-                timestamp=message.timestamp,
+                message_id=processed.message.message_id,
+                sender=processed.message.sender_id,
+                timestamp=processed.message.received_at,
             )
         )
 

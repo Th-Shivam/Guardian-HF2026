@@ -9,6 +9,8 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.services.url.models import UrlEvidence
+
 
 class SignalType(str, Enum):
     """A category of suspicious signal Guardian can detect.
@@ -90,6 +92,13 @@ class AnalysisResult(BaseModel):
     url_analyses: list[UrlAnalysis] = Field(
         default_factory=list,
         description="Per-URL risk analysis, one entry per URL in `urls`, same order.",
+    )
+    url_evidence: list[UrlEvidence] = Field(
+        default_factory=list,
+        description=(
+            "Live web-search evidence for each URL's domain. Empty when live "
+            "verification is disabled; one entry per URL, same order as `urls`."
+        ),
     )
     signals: list[DetectedSignal] = Field(
         default_factory=list,

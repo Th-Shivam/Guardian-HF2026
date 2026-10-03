@@ -6,10 +6,10 @@ A user forwards a suspicious WhatsApp message to Guardian's number. Guardian
 analyses it and replies with a simple risk assessment and one safe action to
 take.
 
-> **Status: early foundation.** A running FastAPI backend, a running React
-> frontend, and a WhatsApp webhook that accepts and normalises inbound
-> messages. There is no AI, no outbound delivery, no database and no UI
-> beyond a placeholder — nothing is analysed or stored yet.
+> **Status: evidence collection.** The FastAPI webhook normalises inbound
+> messages, detects deterministic risk signals, and optionally collects real
+> domain-search evidence through SerpApi. The React frontend remains a
+> placeholder. There is no AI verdict, outbound delivery, or database yet.
 
 ## Structure
 
@@ -38,8 +38,9 @@ The `services/` subpackages keep logic out of the HTTP layer:
 | Package              | Status                                          |
 | -------------------- | ----------------------------------------------- |
 | `services/whatsapp/` | inbound webhook + verification (outbound is a stub) |
-| `services/analysis/` | AI risk assessment — not started                |
-| `services/url/`      | link extraction, redirect expansion, reputation — not started |
+| `services/processing/` | normalization, offline analysis, and optional live evidence |
+| `services/analysis/` | deterministic text signals, URL extraction, lexical URL analysis |
+| `services/url/`      | real SerpApi domain searches and concise source evidence |
 | `services/evidence/` | persistence, audit trail, reports — not started |
 
 ## API
@@ -106,6 +107,67 @@ Meta's Cloud API payload shape lives entirely in
 `app/services/whatsapp/meta.py`. To add another backend, implement the
 interface in `base.py` and register it in `registry.py`; selection is the
 `GUARDIAN_WHATSAPP_PROVIDER` env var.
+
+## Live URL verification
+
+The existing URL extractor and signal detector are reused unchanged:
+
+```text
+GuardianMessage
+  -> MessageProcessor: normalize text and timestamp
+  -> SignalAnalyzer: extract URLs and detect offline signals
+  -> UrlVerifier: query SerpApi once per distinct domain
+  -> ProcessedMessage: normalized message + AnalysisResult with url_evidence
+```
+
+Set `GUARDIAN_SERPAPI_API_KEY` in the root `.env` to enable live lookups, then
+restart the backend. Obtain a real key from [SerpApi](https://serpapi.com/manage-api-key).
+There is no mock provider or fabricated fallback: with an empty key, Guardian
+runs offline analysis only and `url_evidence` is empty.
+
+| Environment variable | Default | Purpose |
+| --- | --- | --- |
+| `GUARDIAN_SERPAPI_API_KEY` | empty | Private SerpApi key; enables live verification |
+| `GUARDIAN_SERPAPI_ENDPOINT` | `https://serpapi.com/search.json` | HTTPS search endpoint |
+| `GUARDIAN_SERPAPI_TIMEOUT` | `10` | Timeout per HTTP operation, in seconds (>0, up to 30) |
+| `GUARDIAN_SERPAPI_RESULTS_PER_DOMAIN` | `5` | Retained organic results per domain (1–10) |
+| `GUARDIAN_SERPAPI_MAX_DOMAINS` | `5` | Maximum search requests per message (1–20) |
+
+Only a sanitized hostname is sent in a query such as
+`"example.com" (scam OR phishing OR fraud OR review)`. Message bodies, sender
+identifiers, URL credentials, paths, and query tokens are not sent. Guardian
+never visits the suspicious link, follows its redirects, or fetches result
+pages. Search evidence therefore describes the domain, not proof about an
+individual page or a shortened link's destination.
+
+### Evidence contract
+
+`MessageProcessor.process_with_analysis(message)` returns a `ProcessedMessage`:
+
+- `message`: the normalized `GuardianMessage`.
+- `analysis`: the existing `AnalysisResult`, enriched with `url_evidence`.
+- Each evidence entry contains `url`, `domain`, `query`, `results`, and `error`.
+- Each result contains the source `title`, source `url`, a `snippet` of at most
+  300 characters (empty if the source provides none), and a `source` name/host.
+
+There is one evidence entry per extracted URL, in the same order. URLs sharing
+one domain reuse a lookup, including failed lookups. Invalid targets, private
+IP addresses, exhausted per-message budgets, timeouts, provider errors, and
+malformed responses produce explicit errors rather than dropping a message.
+A successful search with no matches has empty `results` and no `error`.
+**Neither an empty search nor a failed lookup means a URL is safe.** Results are
+untrusted source material for a future risk decision, not an AI-generated verdict.
+
+The app lifespan creates a shared SerpApi HTTP client, injects it into the
+processor used by the webhook, and closes it on shutdown. The synchronous
+webhook handler waits for these bounded lookups; there is no background queue
+or cross-delivery deduplication yet. Evidence stays internal rather than being
+reflected in the webhook acknowledgement. Existing callers of `process(message)`
+retain its normalized-message return value; callers needing evidence use
+`process_with_analysis(message)`. Neither method persists evidence yet.
+
+The integration follows SerpApi's [Google Search API](https://serpapi.com/search-api)
+and [organic-results schema](https://serpapi.com/organic-results).
 
 ## Prerequisites
 

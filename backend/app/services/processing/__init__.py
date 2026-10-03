@@ -7,7 +7,11 @@ WhatsApp, Meta, or FastAPI.
 
 Flow::
 
-    provider payload -> GuardianMessage -> MessageProcessor -> acknowledgement
+    provider payload -> GuardianMessage -> MessageProcessor -> ProcessedMessage
+
+``process_with_analysis`` returns the normalized message and its analysis,
+including live URL evidence when configured. ``process`` keeps the original
+message-only return value.
 
 Keeping the model here rather than in ``app.schemas`` is what preserves the
 dependency direction: transports depend on the domain, never the other way
@@ -16,11 +20,12 @@ round.
 
 from app.services.processing.errors import InvalidMessageError, ProcessingError
 from app.services.processing.models import GuardianMessage
-from app.services.processing.service import MessageProcessor
+from app.services.processing.service import MessageProcessor, ProcessedMessage
 
 __all__ = [
     "GuardianMessage",
     "InvalidMessageError",
     "MessageProcessor",
+    "ProcessedMessage",
     "ProcessingError",
 ]

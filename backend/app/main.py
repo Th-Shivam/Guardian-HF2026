@@ -14,21 +14,38 @@ from app.api.exception_handlers import register_exception_handlers
 from app.api.router import api_router
 from app.config import Settings, get_settings
 from app.core.logging import configure_logging, get_logger
+from app.services.processing import MessageProcessor
+from app.services.url import SerpApiClient, UrlVerifier
 
 logger = get_logger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Startup/shutdown hooks.
-
-    Future services (DB pools, HTTP clients, model clients) should be created
-    here and attached to ``app.state`` so they are shared and cleanly closed.
-    """
+    """Own the shared SerpApi connection pool and the message pipeline."""
     settings: Settings = app.state.settings
     logger.info("Guardian API starting (env=%s, debug=%s)", settings.env, settings.debug)
-    yield
-    logger.info("Guardian API shutting down")
+    serpapi_client: SerpApiClient | None = None
+    try:
+        verifier = None
+        if settings.url_verification_enabled:
+            serpapi_client = SerpApiClient(
+                settings.serpapi_api_key.get_secret_value(),
+                endpoint=str(settings.serpapi_endpoint),
+                timeout=settings.serpapi_timeout,
+            )
+            verifier = UrlVerifier(
+                serpapi_client,
+                results_per_domain=settings.serpapi_results_per_domain,
+                max_domains=settings.serpapi_max_domains,
+            )
+        app.state.message_processor = MessageProcessor(url_verifier=verifier)
+        logger.info("Live URL verification %s", "enabled" if verifier else "disabled")
+        yield
+    finally:
+        if serpapi_client is not None:
+            serpapi_client.close()
+        logger.info("Guardian API shutting down")
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:

@@ -16,6 +16,11 @@ def configure_logging(debug: bool = False) -> None:
         format=_LOG_FORMAT,
         force=True,
     )
+    # SerpApi authenticates in the query string. HTTPX logs complete request
+    # URLs at INFO, and httpcore emits request details at DEBUG; neither should
+    # copy credentials or user-supplied domains into application logs.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def get_logger(name: str) -> logging.Logger:
