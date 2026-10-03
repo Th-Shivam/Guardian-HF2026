@@ -14,6 +14,7 @@ from fastapi.responses import PlainTextResponse
 
 from app.api.dependencies import get_message_processor
 from app.core.logging import get_logger
+from app.core.sentry import capture_exception
 from app.schemas.whatsapp import AcknowledgedMessage, VerificationRequest, WebhookAck
 from app.services.processing import InvalidMessageError, MessageProcessor
 from app.services.whatsapp import WhatsAppProvider, get_whatsapp_provider
@@ -120,6 +121,7 @@ def receive_webhook(
         except InvalidMessageError as exc:
             # Deliberate: a message we cannot use is skipped, not fatal. The
             # reason is logged server-side and never reflected to the caller.
+            capture_exception(exc)
             logger.warning("Skipping unprocessable message: %s", exc)
             ignored += 1
             continue

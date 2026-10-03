@@ -22,6 +22,7 @@ from ipaddress import ip_address
 from urllib.parse import urlsplit
 
 from app.core.logging import get_logger
+from app.core.sentry import capture_exception
 from app.services.url.errors import SerpApiError
 from app.services.url.models import UrlEvidence
 from app.services.url.serpapi import SerpApiClient
@@ -83,6 +84,7 @@ class UrlVerifier:
                     except SerpApiError as exc:
                         # Client errors are sanitized; do not log target URLs,
                         # domains, query strings, or provider response bodies.
+                        capture_exception(exc)
                         logger.warning("URL verification unavailable: %s", exc)
                         item = item.model_copy(update={"error": str(exc)})
                 cache[domain] = item

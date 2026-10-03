@@ -40,6 +40,14 @@ class GemmaClient:
             headers["Authorization"] = f"Bearer {api_key.strip()}"
         self._client = httpx.Client(headers=headers, timeout=timeout, follow_redirects=False)
 
+    @property
+    def provider(self) -> GemmaProvider:
+        return self._provider
+
+    @property
+    def model(self) -> str:
+        return self._model
+
     def complete(self, prompt: str, schema: dict[str, Any]) -> str:
         """Return only a completed assistant response; never log sensitive data."""
         response_format: dict[str, Any] = {"type": self._response_format}

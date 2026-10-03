@@ -1,4 +1,5 @@
 import type { BridgeConfig } from './config.js'
+import { traceHeaders } from './observability.js'
 
 /** Matches the existing Python GuardianMessage contract; no analysis in Node. */
 export interface GuardianMessage {
@@ -22,6 +23,7 @@ export async function requestReply(
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${config.token}`,
+      ...traceHeaders(),
     },
     body: JSON.stringify(message),
     signal: AbortSignal.any([shutdown, AbortSignal.timeout(180_000)]),

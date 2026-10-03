@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.api.dependencies import get_message_processor
+from app.core.sentry import capture_exception, guardian_span, input_type, set_success
 from app.schemas.bridge import BridgeMessage, BridgeReply
 from app.services.processing import InvalidMessageError, MessageProcessor
 
@@ -96,26 +97,37 @@ def receive_bridge_message(
     """Call the existing pipeline once; format only its generated assessment."""
     try:
         processed = processor.process_with_analysis(message)
-    except InvalidMessageError:
+    except InvalidMessageError as exc:
+        capture_exception(exc)
         raise HTTPException(status_code=422, detail="Message could not be processed.") from None
 
     assessment = processed.risk_assessment
-    if assessment is None:
-        # No invented assessment when inference is disabled or fails. The
-        # bridge may send a transport-level availability notice, not a verdict.
-        raise HTTPException(status_code=503, detail="Guardian could not produce a risk assessment.")
+    with guardian_span(
+        "guardian.response_formatting",
+        "guardian.response",
+        data={
+            "input_type": input_type(processed.message.text, has_url=bool(processed.analysis.urls)),
+        },
+    ) as span:
+        if assessment is None:
+            # No invented assessment when inference is disabled or fails. The
+            # bridge may send a transport-level availability notice, not a verdict.
+            set_success(span, False)
+            raise HTTPException(status_code=503, detail="Guardian could not produce a risk assessment.")
 
-    copy = _REPLY_COPY[assessment.response_language]
-    why = _brief(assessment.short_user_explanation, 240, copy["uncertain"])
-    action = _brief(assessment.recommended_action, 180, copy["pause"])
-    # The conditional reminder covers sensitive requests in every language,
-    # without adding detection rules or changing the assessment. Confidence is
-    # a model estimate, so omit percentages and raw evidence from the reply.
-    return BridgeReply(
-        message_id=processed.message.message_id,
-        reply=(
-            f"*Guardian — {assessment.risk_level} RISK*\n\n"
-            f"*{copy['why']}*\n{why}\n\n"
-            f"*{copy['action']}*\n{action}\n{copy['verify']}"
-        ),
-    )
+        copy = _REPLY_COPY[assessment.response_language]
+        why = _brief(assessment.short_user_explanation, 240, copy["uncertain"])
+        action = _brief(assessment.recommended_action, 180, copy["pause"])
+        # The conditional reminder covers sensitive requests in every language,
+        # without adding detection rules or changing the assessment. Confidence is
+        # a model estimate, so omit percentages and raw evidence from the reply.
+        reply = BridgeReply(
+            message_id=processed.message.message_id,
+            reply=(
+                f"*Guardian — {assessment.risk_level} RISK*\n\n"
+                f"*{copy['why']}*\n{why}\n\n"
+                f"*{copy['action']}*\n{action}\n{copy['verify']}"
+            ),
+        )
+        set_success(span, True)
+        return reply

@@ -1,16 +1,15 @@
 """Application configuration.
 
 Settings are read from environment variables, falling back to the repository
-root ``.env`` file. Every variable is namespaced with a ``GUARDIAN_`` prefix so
-backend config never collides with frontend (``VITE_``) config in the shared
-``.env``.
+root ``.env`` file. Backend variables use a ``GUARDIAN_`` prefix, except the
+standard ``SENTRY_DSN``. None are exposed as frontend (``VITE_``) config.
 """
 
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Self
 
-from pydantic import Field, HttpUrl, SecretStr, field_validator, model_validator
+from pydantic import AliasChoices, Field, HttpUrl, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # backend/app/config.py -> backend/app -> backend -> <repo root>
@@ -36,6 +35,9 @@ class Settings(BaseSettings):
 
     env: str = "development"
     debug: bool = False
+    sentry_dsn: SecretStr = Field(
+        default=SecretStr(""), validation_alias=AliasChoices("SENTRY_DSN", "sentry_dsn")
+    )
 
     host: str = "127.0.0.1"
     port: int = 8000

@@ -25,6 +25,14 @@ class GemmaReasoner:
         self._client = client
         self._max_input_chars = max_input_chars
 
+    @property
+    def provider(self) -> str:
+        return self._client.provider
+
+    @property
+    def model(self) -> str:
+        return self._client.model
+
     def assess(self, message: GuardianMessage, analysis: AnalysisResult) -> RiskAssessment:
         """Return a validated model response or an explicit reasoning failure.
 

@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.core.logging import get_logger
+from app.core.sentry import capture_exception
 from app.services.whatsapp.errors import (
     ConfigurationError,
     PayloadError,
@@ -31,12 +32,14 @@ async def handle_verification_error(_: Request, exc: VerificationError) -> JSONR
 
 async def handle_configuration_error(_: Request, exc: ConfigurationError) -> JSONResponse:
     """Operator error. Detail is logged, never returned."""
+    capture_exception(exc)
     logger.error("WhatsApp misconfiguration: %s", exc)
     return JSONResponse(status_code=500, content={"detail": "WhatsApp provider is misconfigured."})
 
 
 async def handle_whatsapp_error(_: Request, exc: WhatsAppError) -> JSONResponse:
     """Catch-all for the WhatsApp layer."""
+    capture_exception(exc)
     logger.exception("Unhandled WhatsApp error", exc_info=exc)
     return JSONResponse(status_code=500, content={"detail": "WhatsApp request failed."})
 

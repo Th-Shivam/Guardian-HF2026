@@ -14,6 +14,7 @@ from app.api.exception_handlers import register_exception_handlers
 from app.api.router import api_router
 from app.config import Settings, get_settings
 from app.core.logging import configure_logging, get_logger
+from app.core.sentry import GuardianTracingMiddleware, init_sentry
 from app.services.processing import MessageProcessor
 from app.services.reasoning import GemmaClient, GemmaReasoner
 from app.services.url import SerpApiClient, UrlVerifier
@@ -80,6 +81,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = settings
+    if init_sentry(settings.sentry_dsn.get_secret_value()):
+        app.add_middleware(GuardianTracingMiddleware)
 
     app.add_middleware(
         CORSMiddleware,

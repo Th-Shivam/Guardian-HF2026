@@ -17,6 +17,15 @@ import { requestReply, type GuardianMessage } from './backend.js'
 import { loadConfig } from './config.js'
 import { extractImageText } from './ocr.js'
 import { transcribeVoice, VoiceTranscriptionError, VOICE_UNAVAILABLE } from './voice.js'
+import {
+  captureException,
+  finishGuardianTrace,
+  initSentry,
+  inputType,
+  startGuardianTrace,
+  withGuardianSpan,
+  type GuardianTrace,
+} from './observability.js'
 
 const BUFFER_INACTIVITY_MS = 60 * 1000
 const MAX_QUEUE = 100
@@ -28,6 +37,7 @@ interface Job {
   message: GuardianMessage
   reply?: string
   voiceNotice?: string
+  trace?: GuardianTrace
 }
 
 interface SenderBuffer {
@@ -37,6 +47,7 @@ interface SenderBuffer {
   pendingVoices: number
   voiceNotices: Set<string>
   expired: boolean
+  trace?: GuardianTrace
 }
 
 interface IncomingMessage {
@@ -80,6 +91,7 @@ function remember<T>(cache: Map<string, T>, key: string, value: T): void {
 
 async function main(): Promise<void> {
   const config = loadConfig()
+  initSentry()
   process.umask(0o077)
   await mkdir(config.authDirectory, { recursive: true, mode: 0o700 })
   await chmod(config.authDirectory, 0o700)
@@ -110,9 +122,13 @@ async function main(): Promise<void> {
     stopping = true
     connected = false
     if (reconnectTimer) clearTimeout(reconnectTimer)
-    for (const buffer of buffers.values()) clearTimeout(buffer.timer)
+    for (const buffer of buffers.values()) {
+      clearTimeout(buffer.timer)
+      finishGuardianTrace(buffer.trace, false)
+    }
     buffers.clear()
     shutdown.abort()
+    for (const job of queue) finishGuardianTrace(job.trace, false)
     queue.length = 0
     socket?.end(undefined) // disconnect, do not revoke the saved linked device
     await Promise.all([imageWork, voiceWork]) // wait for temporary image/audio cleanup
@@ -151,7 +167,9 @@ async function main(): Promise<void> {
       },
       reply: readable.length ? undefined : voiceNotice,
       voiceNotice: readable.length ? voiceNotice : undefined,
+      trace: readable.length ? buffer.trace : undefined,
     })
+    if (!readable.length) finishGuardianTrace(buffer.trace, false)
     console.info(`Flushed WhatsApp batch to queue: sender=${senderId} messages=${buffer.messages.length}`)
     void drain()
   }
@@ -163,12 +181,25 @@ async function main(): Promise<void> {
       while (connected && socket && !stopping && queue.length) {
         const job = queue[0]!
         if (job.reply === undefined) {
+          let successful = true
           try {
-            job.reply = await requestReply(config, job.message, shutdown.signal)
+            job.reply = await withGuardianSpan(
+              job.trace,
+              {
+                name: 'guardian.backend_request',
+                op: 'http.client',
+                attributes: { provider: 'guardian-backend', input_type: inputType(job.message.text) },
+              },
+              () => requestReply(config, job.message, shutdown.signal),
+            )
           } catch {
+            successful = false
             if (stopping) return
             console.error('Guardian request failed; sending an availability notice, not a risk assessment.')
             job.reply = UNAVAILABLE
+          } finally {
+            finishGuardianTrace(job.trace, successful)
+            job.trace = undefined
           }
           if (job.voiceNotice) job.reply += `\n\n${job.voiceNotice}`
         }
@@ -185,7 +216,8 @@ async function main(): Promise<void> {
             remember(sent, `${job.message.sender_id}:${outgoing.key.id}`, outgoing.message)
           }
           console.info('Guardian reply submitted to WhatsApp.')
-        } catch {
+        } catch (error) {
+          captureException(error)
           // Delivery may already have succeeded. Do not blindly retry and
           // create duplicate replies; Baileys may request a cached resend.
           console.error('WhatsApp reply could not be confirmed; not retrying automatically.')
@@ -296,6 +328,7 @@ async function main(): Promise<void> {
               pendingVoices: 0,
               voiceNotices: new Set(),
               expired: false,
+              trace: startGuardianTrace(inputType(message.text, isImage ? 'image' : isAudio ? 'voice' : undefined)),
             }
             buffers.set(message.sender_id, buffer)
           }
@@ -308,7 +341,20 @@ async function main(): Promise<void> {
             imageWork = imageWork.then(async () => {
               if (stopping) return
               try {
-                message.text = await extractImageText(incoming, shutdown.signal)
+                message.text = await withGuardianSpan(
+                  imageBuffer.trace,
+                  {
+                    name: 'execute_tool ocr',
+                    op: 'gen_ai.execute_tool',
+                    attributes: {
+                      input_type: 'image', provider: 'tesseract',
+                      'gen_ai.operation.name': 'execute_tool',
+                      'gen_ai.tool.name': 'ocr',
+                      'gen_ai.agent.name': 'Guardian',
+                    },
+                  },
+                  () => extractImageText(incoming, shutdown.signal),
+                )
               } catch {
                 // Never log SDK errors, OCR output, media URLs, or file paths.
                 console.error('Image OCR unavailable: check Tesseract/eng installation, media access, size, and time limits.')
@@ -330,7 +376,22 @@ async function main(): Promise<void> {
             voiceWork = voiceWork.then(async () => {
               if (stopping) return
               try {
-                message.text = await transcribeVoice(incoming, config, shutdown.signal)
+                message.text = await withGuardianSpan(
+                  voiceBuffer.trace,
+                  {
+                    name: 'execute_tool stt',
+                    op: 'gen_ai.execute_tool',
+                    attributes: {
+                      input_type: 'voice',
+                      provider: 'elevenlabs',
+                      model: config.elevenLabsSttModel,
+                      'gen_ai.operation.name': 'execute_tool',
+                      'gen_ai.tool.name': 'stt',
+                      'gen_ai.agent.name': 'Guardian',
+                    },
+                  },
+                  () => transcribeVoice(incoming, config, shutdown.signal),
+                )
               } catch (error) {
                 message.text = ''
                 if (!stopping) {
@@ -362,7 +423,8 @@ async function main(): Promise<void> {
   connect()
 }
 
-main().catch(() => {
+main().catch(error => {
+  captureException(error)
   // Do not print exception objects: SDK/network errors may carry credentials.
   console.error('Bridge startup failed. Check Node version, .env configuration, and .auth directory permissions.')
   process.exitCode = 1

@@ -315,6 +315,52 @@ Set `GUARDIAN_WHATSAPP_BRIDGE_TOKEN` to a random secret of at least 32 character
 (`openssl rand -hex 32`). Configure Gemma for generated replies and SerpApi for
 live URL evidence. No Meta credentials or public WhatsApp webhook are needed.
 
+### Optional Sentry observability
+
+Guardian's Sentry integration uses only free Developer-plan error monitoring and
+tracing. It does not enable profiling, replay, logs, metrics, or any paid Sentry
+feature. The SDKs send only fixed operation names and safe metadata such as input
+type, provider, model, success, and timing; request bodies, message text, phone
+numbers, media, private URLs, credentials, and tokens are excluded.
+
+If `SENTRY_DSN` is empty or absent, both Guardian processes continue without
+Sentry. When configured, each existing one-minute WhatsApp batch gets a fresh
+trace, from buffering through OCR/STT to the backend reply. Only a trace-ID
+header is propagated to FastAPI, which adds normalization, signal analysis,
+URL verification, Gemma, and response-formatting spans. Agent/model/tool spans
+use Sentry's Agent Tracing conventions without recording prompts or outputs.
+Direct backend requests get their own trace. Health probes are not traced.
+
+Tracing samples 100% of these requests so the whole pipeline is visible while
+within the free plan's quota. Once that quota is exhausted, Sentry drops excess
+telemetry; Guardian continues normally. Do not upgrade or purchase extra volume
+for this integration.
+
+Manual setup is only needed when you want telemetry:
+
+1. Sign up at [sentry.io/signup](https://sentry.io/signup/), or sign in to an
+   existing account. In **Settings → Subscription**, confirm the organization
+   is on **Developer (Free)**, not a paid plan or trial-only feature setup. No
+   payment method or paid add-on is needed.
+2. Go to **Projects → Create Project** (also available under **Settings →
+   Projects**). Select **Python / FastAPI**, name it `guardian-backend`, and
+   create it. The bridge uses this same project; no second project is required.
+3. Open **Settings → Projects → guardian-backend → Client Keys (DSN)** and
+   copy the displayed DSN.
+4. Add `SENTRY_DSN=<copied DSN>` to the private repository-root `.env`, or set
+   it in the deployment environment for both backend and bridge processes.
+   Do not put it in `.env.example`, frontend `VITE_` variables, or git.
+5. Install the updated dependencies (`pip install -r backend/requirements.txt`
+   in the backend virtualenv, and `npm --prefix whatsapp-bridge ci`), rebuild
+   the bridge with `npm --prefix whatsapp-bridge run build`, and restart both
+   processes.
+
+No auth token, Sentry CLI, paid feature switch, custom dashboard, or additional
+configuration is required. After a normal request, select `guardian-backend` in
+**Explore → Traces** (or **Traces** in the current UI) and open `guardian.request`.
+Use **Issues** for captured errors; free Agent Tracing views can also display
+these spans. The existing Gemma/SerpApi/ElevenLabs configuration is unchanged.
+
 ### Backend
 
 ```bash
