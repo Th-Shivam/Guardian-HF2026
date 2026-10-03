@@ -240,13 +240,15 @@ the normalized JSON message described above. FastAPI validates the shape and
 calls the existing Python pipeline. A successful response contains:
 
 - `message_id`: the original message ID, checked by the bridge.
-- `reply`: a consistent `HIGH RISK` / `MEDIUM RISK` / `LOW RISK` heading, Gemma's
-  `short_user_explanation`, and its `recommended_action`, formatted by Python.
-  Gemma chooses English, Hindi (Devanagari), or Hinglish (Roman Hindi) from the
-  full buffered message/OCR content. The explanation and action label match that
-  choice; Node sends the reply unchanged. URL-only or sparse input defaults to
-  English unless the batch provides language context. OCR language data and
-  transport-error notices are unchanged.
+- `reply`: a consistent `HIGH RISK` / `MEDIUM RISK` / `LOW RISK` heading, a short
+  **Why** section using Gemma's explanation, and **What to do** with a practical
+  action and official-channel verification reminder for sensitive requests.
+  Python bounds the generated prose at sentence boundaries and omits confidence
+  percentages and raw evidence. Gemma chooses English, Hindi (Devanagari), or
+  Hinglish (Roman Hindi) from the full buffered message/OCR content. Both section
+  labels and advice match that choice; Node sends the reply unchanged. URL-only
+  or sparse input defaults to English unless the batch provides language context.
+  OCR language data and transport-error notices are unchanged.
 
 The endpoint does not echo the original text or raw search evidence. Invalid
 credentials return 401; an unset/short backend token or unavailable Gemma

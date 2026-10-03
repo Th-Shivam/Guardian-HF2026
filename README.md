@@ -228,8 +228,16 @@ Language selection uses the actual buffered message and OCR content, not English
 OCR labels, generated failure notices, signal explanations, or search results.
 URLs, domains, evidence titles, and technical identifiers are not translated.
 The WhatsApp heading remains `Guardian — HIGH RISK`, `MEDIUM RISK`, or `LOW RISK`;
-the explanation and action label follow the selected language. Existing transport
-error/availability notices stay unchanged when no assessment is available.
+the explanation and action label follow the selected language. Replies use three
+short sections: risk level, **Why**, and **What to do** (localized for Hindi and
+Hinglish). The formatter keeps complete sentences within 240 characters for the
+explanation and 180 for the generated action, with neutral wording if no sentence
+fits. A short conditional reminder always directs money/OTP/password/PIN/login
+requests to the organisation's official app, independently opened website, or
+trusted official phone number—not the received message/link. Confidence percentages,
+raw search results, and OCR dumps are omitted. Numeric certainty claims are not
+forwarded; the assessment itself is unchanged. Existing transport-error notices
+stay unchanged when no assessment is available.
 
 OCR itself is unchanged and still uses Tesseract's English language data; this
 feature does not add Devanagari OCR recognition. Any recognized text follows the
