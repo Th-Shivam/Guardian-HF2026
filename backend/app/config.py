@@ -8,8 +8,9 @@ backend config never collides with frontend (``VITE_``) config in the shared
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal, Self
 
-from pydantic import Field, HttpUrl, SecretStr, field_validator
+from pydantic import Field, HttpUrl, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # backend/app/config.py -> backend/app -> backend -> <repo root>
@@ -26,6 +27,7 @@ class Settings(BaseSettings):
         env_prefix="GUARDIAN_",
         case_sensitive=False,
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     project_name: str = "Guardian"
@@ -75,6 +77,47 @@ class Settings(BaseSettings):
     def url_verification_enabled(self) -> bool:
         """True when live URL verification is configured and usable."""
         return bool(self.serpapi_api_key.get_secret_value().strip())
+
+    # ---- Gemma reasoning ----
+    # Explicit opt-in: message text and collected evidence are sent to this
+    # inference provider. The default model is open-weight Gemma, not Gemini.
+    gemma_enabled: bool = False
+    gemma_provider: Literal["openrouter", "openai_compatible"] = "openrouter"
+    gemma_base_url: HttpUrl = HttpUrl("https://openrouter.ai/api/v1")
+    gemma_api_key: SecretStr = SecretStr("")
+    gemma_model: str = Field(default="google/gemma-3-27b-it", min_length=1, max_length=200)
+    gemma_timeout: float = Field(default=30.0, gt=0, le=120, allow_inf_nan=False)
+    gemma_max_tokens: int = Field(default=1024, ge=128, le=4096)
+    gemma_max_input_chars: int = Field(default=60_000, ge=4096, le=200_000)
+    gemma_response_format: Literal["json_schema", "json_object"] = "json_schema"
+
+    @field_validator("gemma_model")
+    @classmethod
+    def _gemma_model_name(cls, value: str) -> str:
+        value = value.strip()
+        if "gemma" not in value.lower() or any(char.isspace() for char in value):
+            raise ValueError("Configure a Gemma model ID or a served alias containing 'gemma'.")
+        return value
+
+    @field_validator("gemma_base_url")
+    @classmethod
+    def _secure_gemma_base_url(cls, value: HttpUrl) -> HttpUrl:
+        loopback = value.host in {"localhost", "127.0.0.1", "[::1]", "::1"}
+        if value.scheme != "https" and not loopback:
+            raise ValueError("Gemma requires HTTPS, except for a loopback inference server.")
+        if value.username or value.password or value.query or value.fragment:
+            raise ValueError("Gemma base URL must not contain credentials, query, or fragment.")
+        return value
+
+    @model_validator(mode="after")
+    def _gemma_configuration(self) -> Self:
+        if self.gemma_enabled:
+            loopback = self.gemma_base_url.host in {"localhost", "127.0.0.1", "[::1]", "::1"}
+            if not loopback and not self.gemma_api_key.get_secret_value().strip():
+                raise ValueError("GUARDIAN_GEMMA_API_KEY is required for remote Gemma inference.")
+            if self.gemma_provider == "openrouter" and self.gemma_base_url.host != "openrouter.ai":
+                raise ValueError("Use the openai_compatible provider for a non-OpenRouter Gemma endpoint.")
+        return self
 
     @property
     def cors_origin_list(self) -> list[str]:

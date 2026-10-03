@@ -6,10 +6,11 @@ A user forwards a suspicious WhatsApp message to Guardian's number. Guardian
 analyses it and replies with a simple risk assessment and one safe action to
 take.
 
-> **Status: evidence collection.** The FastAPI webhook normalises inbound
-> messages, detects deterministic risk signals, and optionally collects real
-> domain-search evidence through SerpApi. The React frontend remains a
-> placeholder. There is no AI verdict, outbound delivery, or database yet.
+> **Status: evidence-grounded reasoning.** The FastAPI webhook normalises
+> messages, detects deterministic signals, and can collect real domain-search
+> evidence through SerpApi before requesting a structured risk assessment from
+> an open-weight Gemma model. Both integrations require configuration. The React
+> frontend remains a placeholder; outbound delivery and a database are not built.
 
 ## Structure
 
@@ -38,9 +39,10 @@ The `services/` subpackages keep logic out of the HTTP layer:
 | Package              | Status                                          |
 | -------------------- | ----------------------------------------------- |
 | `services/whatsapp/` | inbound webhook + verification (outbound is a stub) |
-| `services/processing/` | normalization, offline analysis, and optional live evidence |
+| `services/processing/` | normalization, existing evidence collection, and configured Gemma reasoning |
 | `services/analysis/` | deterministic text signals, URL extraction, lexical URL analysis |
 | `services/url/`      | real SerpApi domain searches and concise source evidence |
+| `services/reasoning/` | Gemma API client, safety prompt, and validated risk assessments |
 | `services/evidence/` | persistence, audit trail, reports — not started |
 
 ## API
@@ -156,7 +158,7 @@ IP addresses, exhausted per-message budgets, timeouts, provider errors, and
 malformed responses produce explicit errors rather than dropping a message.
 A successful search with no matches has empty `results` and no `error`.
 **Neither an empty search nor a failed lookup means a URL is safe.** Results are
-untrusted source material for a future risk decision, not an AI-generated verdict.
+untrusted source material for Gemma's risk estimate, not themselves a verdict.
 
 The app lifespan creates a shared SerpApi HTTP client, injects it into the
 processor used by the webhook, and closes it on shutdown. The synchronous
@@ -168,6 +170,109 @@ retain its normalized-message return value; callers needing evidence use
 
 The integration follows SerpApi's [Google Search API](https://serpapi.com/search-api)
 and [organic-results schema](https://serpapi.com/organic-results).
+
+## Gemma risk reasoning
+
+Guardian uses **open-weight Gemma**, not Gemini, through a real Chat Completions
+API. The default is `google/gemma-3-27b-it` on OpenRouter. The same adapter works
+with another OpenAI-compatible host or a locally served instruction-tuned Gemma
+model; no provider SDK or local model download is required by Guardian itself.
+
+```text
+GuardianMessage
+  -> existing SignalAnalyzer (text signals + lexical URL analysis)
+  -> existing UrlVerifier (SerpApi evidence, when configured)
+  -> GemmaReasoner (message + the same AnalysisResult)
+  -> validated RiskAssessment
+```
+
+Enable hosted inference in the root `.env`, then restart the backend:
+
+```dotenv
+GUARDIAN_GEMMA_ENABLED=true
+GUARDIAN_GEMMA_PROVIDER=openrouter
+GUARDIAN_GEMMA_BASE_URL=https://openrouter.ai/api/v1
+GUARDIAN_GEMMA_MODEL=google/gemma-3-27b-it
+GUARDIAN_GEMMA_API_KEY=<your-provider-key>
+```
+
+Keep `GUARDIAN_SERPAPI_API_KEY` configured to supply live URL evidence too.
+Without it, Gemma receives the existing offline signals and URL analysis;
+missing search evidence is explicitly not proof of safety.
+
+| Environment variable | Default | Purpose |
+| --- | --- | --- |
+| `GUARDIAN_GEMMA_ENABLED` | `false` | Explicitly enable transmission of message content and evidence |
+| `GUARDIAN_GEMMA_PROVIDER` | `openrouter` | `openrouter` or `openai_compatible` |
+| `GUARDIAN_GEMMA_BASE_URL` | `https://openrouter.ai/api/v1` | API base; `/chat/completions` is appended |
+| `GUARDIAN_GEMMA_API_KEY` | empty | Bearer API key; required remotely, optional on loopback |
+| `GUARDIAN_GEMMA_MODEL` | `google/gemma-3-27b-it` | Provider's Gemma model ID or a served alias containing `gemma` |
+| `GUARDIAN_GEMMA_TIMEOUT` | `30` | Timeout per HTTP operation, in seconds (>0, up to 120) |
+| `GUARDIAN_GEMMA_MAX_TOKENS` | `1024` | Maximum generated tokens (128–4096) |
+| `GUARDIAN_GEMMA_MAX_INPUT_CHARS` | `60000` | Full prompt character budget, including schema (4096–200000) |
+| `GUARDIAN_GEMMA_RESPONSE_FORMAT` | `json_schema` | `json_schema` or explicitly selected `json_object` mode |
+
+For a real local vLLM server, set the provider to `openai_compatible`, the base
+URL to `http://127.0.0.1:8001/v1`, and the model to the Gemma model/alias your
+server exposes (for example `google/gemma-3-4b-it`). You must run that inference
+server and obtain the weights separately. Remote endpoints require HTTPS;
+plain HTTP is allowed only for `localhost`, `127.0.0.1`, or `::1`.
+
+### Structured assessment
+
+The existing `processor.process_with_analysis(message)` now also returns:
+
+- `risk_assessment`: a validated `RiskAssessment`, or `None` if unavailable.
+- `reasoning_error`: empty on success; a safe diagnostic when disabled or failed.
+
+The assessment has exactly these required fields:
+
+| Field | Contract |
+| --- | --- |
+| `risk_level` | `LOW`, `MEDIUM`, or `HIGH` — an estimate, not a scam verdict |
+| `confidence` | Finite number in `[0, 1)`; model-estimated, not calibrated probability |
+| `reasons` | 1–6 concise, nonempty explanations grounded in supplied evidence |
+| `evidence_used` | 1–20 JSON pointers into the message/analysis supplied to Gemma |
+| `recommended_action` | A nonempty safe next step, at most 600 characters |
+| `short_user_explanation` | A nonempty plain-language explanation, at most 500 characters |
+
+For example, `/analysis/signals/0` identifies the first existing signal and
+`/analysis/url_evidence/0/results/0` identifies the first source result for the
+first URL. `/message/text` identifies the forwarded text. Every cited pointer
+is checked against the evidence actually supplied. The full original
+`result.analysis` remains available; the reasoning layer does not rerun URL
+extraction, repeat SerpApi lookups, or replace deterministic signals.
+
+The safety prompt explicitly forbids certainty claims and invented evidence,
+requires reasoning from supplied observations, and recommends independent
+verification before payments or sharing credentials/OTPs. Message text and
+search snippets are treated as **untrusted data**, not instructions. Gemma 3's
+system-level instructions go in its initial user turn, as required by its chat
+template. Only concise reasons are requested, not a chain-of-thought transcript.
+
+The client requests JSON Schema output by default. Hosts that support JSON mode
+but not schemas can use `json_object`; local validation is still mandatory.
+Invalid schemas, unknown evidence references, refusals, truncated completions,
+provider errors, and oversized inputs leave the assessment unavailable. Guardian
+never fabricates an AI response, repairs invalid JSON into an assessment,
+substitutes a different model, or falls back to a heuristic LOW rating. A prompt
+and valid citations do **not** guarantee that the model's prose is correct;
+assessments remain uncertain and should guide safer verification, not replace it.
+
+**Privacy and operations:** Unlike domain-only SerpApi requests, Gemma receives
+forwarded message text and the collected evidence, including original URLs.
+Sender IDs, message IDs, and transport timestamps are omitted, but the text or
+URLs may themselves contain personal information or secrets. Choose a provider
+with appropriate retention policies, or self-host. Prompts, model responses,
+and credentials are not logged. Both HTTP pools are managed by the app lifespan
+and closed on shutdown. The webhook remains synchronous, with no background
+queue; API latency adds to delivery time. Model output stays internal, not in
+the webhook acknowledgement, and is not persisted or sent to WhatsApp yet.
+
+References: [Gemma prompt formatting](https://ai.google.dev/gemma/docs/core/prompt-structure),
+[Gemma 3 27B on OpenRouter](https://openrouter.ai/google/gemma-3-27b-it),
+[structured outputs](https://openrouter.ai/docs/guides/features/structured-outputs),
+and [vLLM serving](https://docs.vllm.ai/en/latest/serving/online_serving/).
 
 ## Prerequisites
 

@@ -3,6 +3,7 @@
 Everything that arrives from any transport funnels through here before it is
 stored or answered. Normalisation and offline signal detection run first;
 optional live URL verification enriches that analysis with search evidence.
+Configured Gemma reasoning then turns these observations into a risk assessment.
 
 Deliberately independent of WhatsApp and FastAPI: this module imports neither,
 so it can be exercised on its own and driven by anything.
@@ -17,9 +18,11 @@ from typing import TYPE_CHECKING
 from app.core.logging import get_logger
 from app.services.processing.errors import InvalidMessageError
 from app.services.processing.models import GuardianMessage
+from app.services.reasoning.errors import ReasoningError
 
 if TYPE_CHECKING:  # annotation only; the real import happens lazily below
     from app.services.analysis import AnalysisResult, SignalAnalyzer
+    from app.services.reasoning import GemmaReasoner, RiskAssessment
     from app.services.url import UrlVerifier
 
 logger = get_logger(__name__)
@@ -27,17 +30,19 @@ logger = get_logger(__name__)
 
 @dataclass(frozen=True)
 class ProcessedMessage:
-    """A normalized message and its evidence, ready for a later risk decision."""
+    """A message, its evidence, and a real Gemma assessment when available."""
 
     message: GuardianMessage
     analysis: AnalysisResult
+    risk_assessment: RiskAssessment | None = None
+    reasoning_error: str = "Gemma reasoning is disabled."
 
 
 class MessageProcessor:
     """Validates and normalises inbound messages, then runs signal analysis.
 
-    The offline analyser is reused unchanged. A configured URL verifier adds
-    real search evidence; without one the result contains offline signals only.
+    The offline analyser and URL verifier are reused unchanged. Gemma consumes
+    their combined result after evidence collection, never in place of it.
     Clients are injected and owned by the caller, not created per message.
     """
 
@@ -46,6 +51,7 @@ class MessageProcessor:
         analyzer: SignalAnalyzer | None = None,
         *,
         url_verifier: UrlVerifier | None = None,
+        reasoner: GemmaReasoner | None = None,
     ) -> None:
         # Imported here, not at module scope: the analysis package imports this
         # one, so a top-level import would close the loop and fail at startup.
@@ -53,6 +59,7 @@ class MessageProcessor:
 
         self._analyzer = analyzer or SignalAnalyzer()
         self._url_verifier = url_verifier
+        self._reasoner = reasoner
 
     def process(self, message: GuardianMessage) -> GuardianMessage:
         """Validate, normalise, and analyse one inbound message.
@@ -71,12 +78,14 @@ class MessageProcessor:
         return self.process_with_analysis(message).message
 
     def process_with_analysis(self, message: GuardianMessage) -> ProcessedMessage:
-        """Return the normalized message plus offline and live evidence.
+        """Return the message, existing evidence, and a configured Gemma assessment.
 
         This is the evidence-bearing pipeline entry point. ``process`` retains
         its original message-only return contract for existing callers. Failed
         lookups remain explicit errors in ``analysis.url_evidence``; neither
-        failed nor empty searches imply that a link is safe.
+        failed nor empty searches imply that a link is safe. Unavailable or
+        invalid reasoning leaves ``risk_assessment`` unset with a diagnostic
+        ``reasoning_error``; it never fabricates a verdict or drops evidence.
         """
         normalized = self._normalize(message)
         result = self._analyzer.analyze(normalized)
@@ -86,9 +95,18 @@ class MessageProcessor:
             )
             result = result.model_copy(update={"url_evidence": evidence})
 
-        # Log identifiers, provenance, and a signal summary only. The body and
-        # the URLs are content a user may believe is malicious; there is no
-        # reason to copy them into our logs. No verdict is reached yet.
+        assessment = None
+        reasoning_error = "Gemma reasoning is disabled."
+        if self._reasoner is not None:
+            try:
+                assessment = self._reasoner.assess(normalized, result)
+                reasoning_error = ""
+            except ReasoningError as exc:
+                reasoning_error = str(exc)
+                logger.warning("Gemma reasoning unavailable: %s", exc)
+
+        # Log identifiers, provenance, and a signal summary only. Neither the
+        # message, search evidence, nor generated explanation belongs in logs.
         logger.info(
             "Guardian received message %s from %s via %s: %d URL(s), signals=[%s]",
             normalized.message_id,
@@ -97,7 +115,12 @@ class MessageProcessor:
             len(result.urls),
             ", ".join(signal.type.value for signal in result.signals),
         )
-        return ProcessedMessage(message=normalized, analysis=result)
+        return ProcessedMessage(
+            message=normalized,
+            analysis=result,
+            risk_assessment=assessment,
+            reasoning_error=reasoning_error,
+        )
 
     @staticmethod
     def _normalize(message: GuardianMessage) -> GuardianMessage:

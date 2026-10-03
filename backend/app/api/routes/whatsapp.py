@@ -104,9 +104,10 @@ def receive_webhook(
     count. Providers retry on non-2xx and eventually disable a webhook that
     keeps failing, so only genuinely malformed bodies error.
 
-    Offline signals and configured SerpApi evidence are collected internally.
-    The acknowledgement contains neither message content nor search evidence;
-    nothing is persisted and no final verdict or outbound reply is produced.
+    Offline signals, configured SerpApi evidence, and the Gemma risk assessment
+    remain internal. Reasoning failures preserve the evidence and do not fail
+    the delivery. The acknowledgement exposes neither message content, search
+    evidence, nor model output. Nothing is persisted or sent as an outbound reply.
     """
     parsed = provider.parse_inbound(payload)
 

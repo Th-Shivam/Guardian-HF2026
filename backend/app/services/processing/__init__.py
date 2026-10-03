@@ -9,9 +9,10 @@ Flow::
 
     provider payload -> GuardianMessage -> MessageProcessor -> ProcessedMessage
 
-``process_with_analysis`` returns the normalized message and its analysis,
-including live URL evidence when configured. ``process`` keeps the original
-message-only return value.
+``process_with_analysis`` returns the normalized message, its existing analysis,
+and a structured Gemma risk assessment when configured and available. Missing
+or failed reasoning is explicit, never a fake assessment. ``process`` keeps the
+original message-only return value.
 
 Keeping the model here rather than in ``app.schemas`` is what preserves the
 dependency direction: transports depend on the domain, never the other way
