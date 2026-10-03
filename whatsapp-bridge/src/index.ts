@@ -16,6 +16,7 @@ import qrcode from 'qrcode-terminal'
 import { requestReply, type GuardianMessage } from './backend.js'
 import { loadConfig } from './config.js'
 
+const BUFFER_INACTIVITY_MS = 2 * 60 * 1000
 const MAX_QUEUE = 100
 const MAX_CACHE = 2000
 const SEEN_TTL_MS = 24 * 60 * 60 * 1000
@@ -24,6 +25,11 @@ const UNAVAILABLE = 'Guardian could not complete this check. No risk assessment 
 interface Job {
   message: GuardianMessage
   reply?: string
+}
+
+interface SenderBuffer {
+  messages: [GuardianMessage, ...GuardianMessage[]]
+  timer: NodeJS.Timeout
 }
 
 function normalize(message: WAMessage): GuardianMessage | undefined {
@@ -58,11 +64,12 @@ async function main(): Promise<void> {
   await chmod(config.authDirectory, 0o700)
   const { state, saveCreds } = await useMultiFileAuthState(config.authDirectory)
   // Baileys can log decrypted content, identifiers, or session details. Only
-  // our content-free lifecycle messages (and explicit login codes) are shown.
+  // our lifecycle/batch metadata (and explicit login codes) are shown.
   const logger = pino({ level: 'silent' })
   const keys = makeCacheableSignalKeyStore(state.keys, logger)
   const shutdown = new AbortController()
   const queue: Job[] = []
+  const buffers = new Map<string, SenderBuffer>()
   const seen = new Map<string, number>()
   const sent = new Map<string, WAMessageContent>()
   let socket: WASocket | undefined
@@ -78,6 +85,8 @@ async function main(): Promise<void> {
     stopping = true
     connected = false
     if (reconnectTimer) clearTimeout(reconnectTimer)
+    for (const buffer of buffers.values()) clearTimeout(buffer.timer)
+    buffers.clear()
     shutdown.abort()
     queue.length = 0
     socket?.end(undefined) // disconnect, do not revoke the saved linked device
@@ -93,6 +102,22 @@ async function main(): Promise<void> {
       reconnectTimer = undefined
       connect()
     }, delay)
+  }
+
+  function flushSender(senderId: string): void {
+    const buffer = buffers.get(senderId)
+    if (!buffer || stopping) return
+    buffers.delete(senderId)
+    // Transfer the reserved buffer slot to the existing queue. Removing the
+    // buffer first lets the sender start a fresh batch while this one runs.
+    queue.push({
+      message: {
+        ...buffer.messages[0],
+        text: buffer.messages.map(message => message.text).join('\n\n'),
+      },
+    })
+    console.info(`Flushed WhatsApp batch to queue: sender=${senderId} messages=${buffer.messages.length}`)
+    void drain()
   }
 
   async function drain(): Promise<void> {
@@ -212,14 +237,26 @@ async function main(): Promise<void> {
           if (!message) continue
           const id = `${message.sender_id}:${message.message_id}`
           if (seen.has(id)) continue
-          if (queue.length >= MAX_QUEUE) {
+          const buffer = buffers.get(message.sender_id)
+          // Reserve a queue slot per waiting sender so an accepted batch is
+          // not dropped when its inactivity timer expires.
+          if (!buffer && queue.length + buffers.size >= MAX_QUEUE) {
             console.error('Bridge queue is full; ignoring a new message. Sender must retry later.')
             continue
           }
           remember(seen, id, now)
-          queue.push({ message })
+          if (buffer) {
+            clearTimeout(buffer.timer)
+            buffer.messages.push(message)
+            buffer.timer = setTimeout(() => flushSender(message.sender_id), BUFFER_INACTIVITY_MS)
+          } else {
+            buffers.set(message.sender_id, {
+              messages: [message],
+              timer: setTimeout(() => flushSender(message.sender_id), BUFFER_INACTIVITY_MS),
+            })
+          }
+          console.info(`Buffering WhatsApp messages: sender=${message.sender_id} messages=${buffer ? buffer.messages.length : 1}`)
         }
-        void drain()
       })
     } catch {
       console.error('Could not create the WhatsApp connection.')

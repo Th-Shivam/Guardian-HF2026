@@ -100,9 +100,20 @@ The bridge never deletes credentials or logs out the account automatically.
   text wrappers are normalized by Baileys; media is not downloaded.
 - The normalized payload uses `message_id`, `sender_id` (the original chat JID),
   `text`, `received_at` (UTC bridge receipt time), and `source: "whatsapp"`.
-- Processing is sequential with a queue capped at 100 messages. Recent IDs are
-  deduplicated in memory for up to 24 hours / 2,000 entries, including during
-  reconnects. Full queues drop new messages with an operator notice.
+- Each sender has an independent **two-minute inactivity buffer**. Every new,
+  non-duplicate text resets only that sender's timer. When it expires, texts are
+  joined in arrival order with `\n\n` and queued as one Guardian message, keeping
+  the first message's ID and receipt time. Single messages also wait two minutes.
+  The sender's buffer is then cleared so the next text starts a new batch.
+- Waiting buffers do not block other senders. Backend processing remains
+  sequential through the existing queue. Queued batches and waiting sender
+  buffers share the 100-slot limit; each buffer reserves its eventual queue slot.
+  Recent IDs remain deduplicated for up to 24 hours / 2,000 entries, including
+  during reconnects. When full, new batches are dropped with an operator notice.
+- Buffering and flush logs show only the sender JID and message count, not text.
+  FastAPI's existing 4,096-character payload limit still applies to the combined
+  text, including separators. Oversized batches are not split or truncated:
+  backend rejection triggers the existing availability notice.
 - Replies are sent only to the original WhatsApp JID, never to a destination
   supplied by the backend or message text. Link previews are disabled.
 - Backend requests time out after three minutes and are not automatically retried.
@@ -111,11 +122,12 @@ The bridge never deletes credentials or logs out the account automatically.
 - A generated reply is kept if WhatsApp disconnects before sending, so reconnects
   do not rerun inference. An uncertain send failure is not blindly retried;
   recent sent messages are available to Baileys' own retry mechanism.
-- Ctrl+C/SIGTERM cancels pending backend requests, closes the socket without
-  revoking the linked device, and waits for queued credential saves.
+- Ctrl+C/SIGTERM clears buffer timers and unsent batches, cancels pending backend
+  requests, closes the socket without revoking the linked device, and waits for
+  queued credential saves.
 
-This is a single-process bridge, not a durable messaging system. Queues, recent
-IDs, and reply caches do not survive a process restart; exactly-once delivery is
+This is a single-process bridge, not a durable messaging system. Buffers, queues,
+recent IDs, and reply caches do not survive a process restart; exactly-once delivery is
 not guaranteed. A sender should resend if no reply arrives. Baileys advises a
 proper database-backed authentication store instead of `useMultiFileAuthState`
 for production deployments. The file-backed store here keeps the small bridge
