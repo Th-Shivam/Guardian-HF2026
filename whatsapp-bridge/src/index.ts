@@ -10,6 +10,7 @@ import makeWASocket, {
   type WASocket,
 } from '@whiskeysockets/baileys'
 import { chmod, mkdir } from 'node:fs/promises'
+import { createServer } from 'node:http'
 import { pino } from 'pino'
 import qrcode from 'qrcode-terminal'
 
@@ -91,6 +92,10 @@ function remember<T>(cache: Map<string, T>, key: string, value: T): void {
 
 async function main(): Promise<void> {
   const config = loadConfig()
+  const port = Number(process.env.PORT ?? 3000)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error('PORT must be an integer between 1 and 65535.')
+  }
   initSentry()
   process.umask(0o077)
   await mkdir(config.authDirectory, { recursive: true, mode: 0o700 })
@@ -117,10 +122,23 @@ async function main(): Promise<void> {
   let imageWork = Promise.resolve()
   let voiceWork = Promise.resolve() // STT stays separate from the existing OCR work
 
+  const healthServer = createServer((request, response) => {
+    if (request.method !== 'GET' || request.url?.split('?')[0] !== '/health') {
+      response.writeHead(404)
+      response.end()
+      return
+    }
+    // Liveness only: pairing/reconnection must not cause health-check restarts.
+    response.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+    response.end(JSON.stringify({ status: 'ok', whatsapp_connected: connected }))
+  })
+
   async function stop(exitCode: number): Promise<void> {
     if (stopping) return
     stopping = true
     connected = false
+    healthServer.close()
+    healthServer.closeAllConnections()
     if (reconnectTimer) clearTimeout(reconnectTimer)
     for (const buffer of buffers.values()) {
       clearTimeout(buffer.timer)
@@ -420,6 +438,11 @@ async function main(): Promise<void> {
 
   process.once('SIGINT', () => { void stop(0) })
   process.once('SIGTERM', () => { void stop(0) })
+  healthServer.on('error', () => {
+    console.error('HTTP health listener failed; stopping the bridge.')
+    void stop(1)
+  })
+  healthServer.listen(port, '0.0.0.0')
   connect()
 }
 
